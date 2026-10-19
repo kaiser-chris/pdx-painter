@@ -1,0 +1,104 @@
+﻿# PDX Painter
+
+A Substance 3D Painter plugin for the 3D models of Victoria 3, Europa
+Universalis 5 and Crusader Kings 3. It opens an entity of an `.asset` file, or a
+`.mesh` file on its own, with its textures. It then writes what you paint back
+into the games' textures, in the format, size and mipmaps they were read in.
+
+It is two halves: **`pdx-painter`**, a command line tool in Go built on
+[pdx-asset-go](https://github.com/kaiser-chris/pdx-asset-go), which reads and
+writes the games' files, and the **PDX Painter** Python plugin, which drives
+Painter. The tool runs as its own process, so a crash in it cannot take Painter
+and unsaved painting down with it.
+
+## Installing
+
+Download the zip for your system from the
+[releases](https://github.com/kaiser-chris/pdx-painter/releases). Extract its
+`PDX Painter` folder into Painter's plugin folder:
+
+- Windows: `Documents\Adobe\Adobe Substance 3D Painter\python\plugins`
+- Linux: `~/Documents/Adobe/Adobe Substance 3D Painter/python/plugins`
+
+Then enable **PDX Painter** in Painter's **Python** menu. It needs Painter 2026
+or newer.
+
+## Using it
+
+**PDX Painter → Open Entity or Mesh...**
+
+- **An `.asset` file:** pick the entity to open. The game, DLC or mod the file
+  belongs to is worked out from where it is. A mod is read together with its
+  game, whose folder the plugin asks for once.
+- **A `.mesh` file:** opens the textures its material names that are next to
+  it. Textures that are missing are created on export, as DXT5.
+
+Every Texture Set gets a fill layer holding the game's maps. Paint on layers
+above it.
+
+**PDX Painter → Export Textures...** asks whether to overwrite the textures
+the files came from (or save next to the mesh), or to save them into another
+folder as flat files. Every file written over is kept once as `.bak`. Maps that
+come back unchanged are not written again.
+
+Only the texels the model's UVs cover are taken from Painter, because the
+games share textures between models. The rest of each map stays as it was.
+
+### Channels
+
+| Map | Channel | Painter |
+|---|---|---|
+| diffuse | RGB / A | Base Color / User0 "Diffuse alpha" |
+| normal | G, A (x, y) / R, B | Normal / User3, User4 where used |
+| properties | R / G / B / A | User1 "Subsurface" / User2 "Specular strength" / Metallic / Roughness |
+
+If the bumps look inverted, tick **Flip the green of normal maps** in
+**PDX Painter → Settings...** and open the file again.
+
+## The command line tool
+
+```sh
+go install github.com/kaiser-chris/pdx-painter/cmd/pdx-painter@latest
+```
+
+```sh
+pdx-painter list file.asset
+pdx-painter prepare -asset file.asset -entity some_entity -out work
+pdx-painter prepare -mesh file.mesh -out work
+pdx-painter pack -manifest work/manifest.json -exported exported (-in-place | -out folder)
+```
+
+`prepare` writes an OBJ, a PNG per channel and a manifest. `pack` lays the
+PNGs Painter exported back into the maps. Every command prints one JSON
+object, or `{"error": ...}` and exits with 1.
+
+## Development
+
+Needs Go 1.26.
+
+```bat
+build.bat     :: tests and builds the tool into "plugin\PDX Painter\bin"
+install.bat   :: copies the plugin into Painter's plugin folder
+```
+
+```sh
+go test ./...
+python -m unittest discover -s plugin/tests
+```
+
+The Go tests use synthetic files and need no game installed. The Python tests
+cover the parts of the plugin that need no Painter.
+
+Releases are made by hand from the **Release** workflow in the Actions tab. It
+tests on Linux and Windows, bundles the plugin with the tool for each, tags the
+version and publishes the release.
+
+## Not done yet
+
+- The mesh is read, never written, and no `.asset` file is made for a mesh.
+- The BC7 encoder writes mode 6 only. That is fine for painting, but a
+  dedicated compressor does better.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
