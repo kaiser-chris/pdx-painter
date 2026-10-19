@@ -11,6 +11,9 @@ import os
 import subprocess
 import sys
 
+# The version of the plugin, which a release writes into the copy it bundles.
+VERSION = "dev"
+
 # The manifest version pdx-painter writes, which the plugin reads.
 MANIFEST_VERSION = 1
 

@@ -14,8 +14,9 @@ import sys
 import tempfile
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(ROOT, "plugin"))
+# The folder the plugin is in, next to this one: plugin/ in the repository,
+# the folder of the bundle in a release build.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Painter lists the plugin by its folder, whose name has a space, which only
 # importlib takes.

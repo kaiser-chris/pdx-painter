@@ -525,7 +525,7 @@ def _ask_where(manifest, metadata):
 
 def edit_settings():
     dialog = QtWidgets.QDialog(_window())
-    dialog.setWindowTitle(TITLE + " settings")
+    dialog.setWindowTitle("{0} settings ({1})".format(TITLE, core.VERSION))
     form = QtWidgets.QFormLayout(dialog)
 
     games = {}
