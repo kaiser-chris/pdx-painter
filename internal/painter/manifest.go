@@ -28,9 +28,9 @@
 package painter
 
 import (
-	"math"
-
 	"image"
+	"math"
+	"strings"
 )
 
 // Version is the version of the manifest, which a plugin checks before it
@@ -55,6 +55,11 @@ type Manifest struct {
 	// Product is the game the files are of, such as victoria3 or eu5, where
 	// that is known.
 	Product string `json:"product,omitempty"`
+
+	// MeshFile is the .mesh file the entity draws, or the mesh opened on its
+	// own, which an export as a new asset copies. It is nil for an entity
+	// whose mesh file is not known.
+	MeshFile *SourceFile `json:"meshFile,omitempty"`
 
 	// Mesh is the OBJ file to create the Painter project from.
 	Mesh string `json:"mesh"`
@@ -96,10 +101,62 @@ type TextureSet struct {
 
 	Channels []Channel `json:"channels"`
 
+	// Meshes are the meshes of MeshFile the set's maps are laid on, which an
+	// asset written for it gives mesh settings. A part of an entity attached
+	// is drawn from another mesh file and is not among them.
+	Meshes []MeshRef `json:"meshes"`
+
 	// Coverage is a mask of the texels the parts cover in texture space, at
 	// the Texture Set's size: what of Painter's export is laid into the
 	// maps, which other models may share. See coverage.go.
 	Coverage string `json:"coverage"`
+}
+
+// SourceFile is a file the manifest was prepared from: the file itself, and
+// its path below the root it was found in, with forward slashes.
+type SourceFile struct {
+	Path     string `json:"path"`
+	Relative string `json:"relative"`
+}
+
+// MeshRef is one mesh of a mesh file: the shape it is of, its place among the
+// shape's meshes, and how the game draws it, which is what the mesh settings
+// of an asset name. For an entity, how it is drawn is its own mesh settings';
+// for a mesh opened on its own, its material's shader, and the shader file
+// the games ship that shader in.
+type MeshRef struct {
+	Shape  string `json:"shape"`
+	Index  int    `json:"index"`
+	Shader string `json:"shader"`
+
+	ShaderFile    string   `json:"shaderFile,omitempty"`
+	ShaderDefines []string `json:"shaderDefines,omitempty"`
+	Subpass       string   `json:"subpass,omitempty"`
+	ShadowOnly    bool     `json:"shadowOnly,omitempty"`
+}
+
+// shaderFiles are the shader files the games ship their mesh shaders in, by
+// what the name of the shader starts with or holds, the first that fits
+// taken: what nearly every mesh setting of Victoria 3 and Europa Universalis
+// 5 names. The rest are pdxmesh.shader's.
+var shaderFiles = []struct{ holds, file string }{
+	{"decal", "gfx/FX/pdxmesh_decal.shader"},
+	{"portrait", "gfx/FX/jomini/portrait.shader"},
+	{"tree", "gfx/FX/tree.shader"},
+	{"lake", "gfx/FX/pdxwater.shader"},
+}
+
+// shaderFileOf is the shader file a shader is shipped in, as shaderFiles say.
+func shaderFileOf(shader string) string {
+	lower := strings.ToLower(shader)
+
+	for _, candidate := range shaderFiles {
+		if strings.Contains(lower, candidate.holds) {
+			return candidate.file
+		}
+	}
+
+	return "gfx/FX/pdxmesh.shader"
 }
 
 // Map is a texture file of the game, and how it is stored.

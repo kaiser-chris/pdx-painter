@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kaiser-chris/pdx-parser-go/asset"
+	"github.com/kaiser-chris/pdx-parser-go/folders"
+
+	"github.com/kaiser-chris/pdx-asset-go/entity"
 	"github.com/kaiser-chris/pdx-asset-go/mesh/meshtest"
 	"github.com/kaiser-chris/pdx-asset-go/texture"
 
@@ -433,15 +437,20 @@ func solid(t *testing.T, path string, size int, colour [4]byte) {
 	}
 }
 
-// A mesh file of its own gets the maps its material names, where they are
-// next to it, and new ones where they are not, which packing makes next to
-// it at the size Painter painted.
+// A mesh file of its own gets maps named after it, whatever its material
+// names: those next to it are read, and the rest are new, which packing makes
+// next to it at the size Painter painted.
 func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 	folder := t.TempDir()
 	meshFile := filepath.Join(folder, "statue.mesh")
 
-	// The quad's material names quad_diffuse.dds, and no other map.
+	// The quad's material names quad_diffuse.dds, which is there and is
+	// not the statue's.
 	if err := os.WriteFile(meshFile, meshtest.QuadFile(2, 2), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(folder, "quad_diffuse.dds"), encoded(t, pattern(16, 0), dds.BC3), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,11 +464,11 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 	}
 
 	set := manifest.TextureSets[0]
-	if set.Name != "quad" || set.Width != newSize {
-		t.Errorf("set %s of %d, want quad, after the diffuse map named, of %d", set.Name, set.Width, newSize)
+	if set.Name != "statue" || set.Width != newSize {
+		t.Errorf("set %s of %d, want statue, after the mesh, of %d", set.Name, set.Width, newSize)
 	}
 
-	for kind, name := range map[string]string{Diffuse: "quad_diffuse.dds", Normal: "statue_normal.dds", Properties: "statue_properties.dds"} {
+	for kind, name := range map[string]string{Diffuse: "statue_diffuse.dds", Normal: "statue_normal.dds", Properties: "statue_properties.dds"} {
 		if stored := set.Maps[kind]; !stored.New || stored.Path != filepath.Join(folder, name) || stored.Format != "BC3" {
 			t.Errorf("%s = %+v, want a new %s", kind, stored, name)
 		}
@@ -483,10 +492,10 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 	}
 
 	exported := t.TempDir()
-	solid(t, filepath.Join(exported, "quad_basecolor.png"), 32, [4]byte{200, 0, 0, 255})
-	solid(t, filepath.Join(exported, "quad_diffusealpha.png"), 32, [4]byte{255, 255, 255, 255})
-	solid(t, filepath.Join(exported, "quad_normal.png"), 32, [4]byte{128, 128, 255, 255})
-	solid(t, filepath.Join(exported, "quad_roughness.png"), 32, [4]byte{64, 64, 64, 255})
+	solid(t, filepath.Join(exported, "statue_basecolor.png"), 32, [4]byte{200, 0, 0, 255})
+	solid(t, filepath.Join(exported, "statue_diffusealpha.png"), 32, [4]byte{255, 255, 255, 255})
+	solid(t, filepath.Join(exported, "statue_normal.png"), 32, [4]byte{128, 128, 255, 255})
+	solid(t, filepath.Join(exported, "statue_roughness.png"), 32, [4]byte{64, 64, 64, 255})
 
 	packed, err := Pack(manifest, PackOptions{Exported: exported, InPlace: true, Backup: true})
 	if err != nil {
@@ -497,7 +506,7 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 		t.Fatalf("packed = %+v, want the three new maps written", packed)
 	}
 
-	diffuse := readBack(t, filepath.Join(folder, "quad_diffuse.dds"), dds.BC3, 32, 6)
+	diffuse := readBack(t, filepath.Join(folder, "statue_diffuse.dds"), dds.BC3, 32, 6)
 	if c, _ := diffuse.Colour(5, 5); c[0] < 195 || c[0] > 205 || c[3] != 255 {
 		t.Errorf("diffuse = %v", c)
 	}
@@ -568,5 +577,155 @@ func TestPackRefusesMapsOfOneName(t *testing.T) {
 
 	if entries, _ := os.ReadDir(out); len(entries) != 0 {
 		t.Errorf("written before refusing: %v", entries)
+	}
+}
+
+// A mesh of several shapes gets a set for each, its maps named after the mesh,
+// those after the first numbered.
+func TestPrepareAMeshOfSeveralShapes(t *testing.T) {
+	folder := t.TempDir()
+	meshFile := filepath.Join(folder, "house.mesh")
+
+	data := meshtest.New().Object(1, "object").
+		Object(2, "LOD_0|house|house_wallsShape").Mesh(meshtest.Quad(2, 2), "walls_diffuse.dds").
+		Object(2, "house_roofShape").Mesh(meshtest.Quad(1, 1), "").
+		Bytes()
+
+	if err := os.WriteFile(meshFile, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := PrepareMesh(meshFile, filepath.Join(t.TempDir(), "work"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, set := range manifest.TextureSets {
+		got = append(got, set.Name+" "+set.Maps[Diffuse].Relative)
+	}
+
+	if want := "house house_diffuse.dds|house_2 house_2_diffuse.dds"; strings.Join(got, "|") != want {
+		t.Errorf("sets = %s, want %s", strings.Join(got, "|"), want)
+	}
+}
+
+// An advanced export saves what was opened as something new: the maps chosen,
+// by new names and formats, a copy of the mesh and an asset drawing it, which
+// the game loads as an entity of its own with the maps not chosen taken from
+// where they were.
+func TestPackAPlanAsANewEntity(t *testing.T) {
+	manifest, _ := prepared(t, Options{})
+	exported := export(t, manifest)
+	solid(t, filepath.Join(exported, "statue_basecolor.png"), 16, [4]byte{0, 200, 0, 255})
+
+	game := manifest.Root
+	mod := filepath.Join(t.TempDir(), "mod")
+	folder := filepath.Join(mod, "gfx", "models", "monument")
+
+	if manifest.MeshFile == nil || manifest.MeshFile.Relative != "gfx/models/statue/statue.mesh" {
+		t.Fatalf("mesh file = %+v", manifest.MeshFile)
+	}
+
+	if meshes := manifest.TextureSets[0].Meshes; len(meshes) != 1 || meshes[0].Shape != "quadShape" || meshes[0].Shader != "standard" {
+		t.Fatalf("meshes = %+v", meshes)
+	}
+
+	plan := &Plan{
+		Folder: folder,
+		Maps: []PlannedMap{
+			{Set: "statue", Kind: Diffuse, File: "monument_diffuse.dds", Format: "BC7"},
+			{Set: "statue", Kind: Properties, File: "monument_properties.dds"},
+		},
+		Mesh:  &PlannedMesh{File: "monument.mesh"},
+		Asset: &PlannedAsset{File: "monument.asset", Mesh: "monument_mesh", Entity: "monument_entity"},
+	}
+
+	packed, err := Pack(manifest, PackOptions{Exported: exported, Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The properties map is as it was, and is written as asked all the same:
+	// it is a new file.
+	if len(packed.Written) != 4 {
+		t.Errorf("written %v, want two maps, the mesh and the asset", packed.Written)
+	}
+
+	readBack(t, filepath.Join(folder, "monument_diffuse.dds"), dds.BC7, 16, 5)
+	readBack(t, filepath.Join(folder, "monument_properties.dds"), dds.BC7, 8, 4)
+
+	original, _ := os.ReadFile(manifest.MeshFile.Path)
+	if copied, _ := os.ReadFile(filepath.Join(folder, "monument.mesh")); string(copied) != string(original) {
+		t.Error("the mesh was not copied as it is")
+	}
+
+	text, err := os.ReadFile(filepath.Join(folder, "monument.asset"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, line := range []string{
+		`name = "monument_mesh"`, `file = "monument.mesh"`, `name = "quadShape"`, `index = 0`,
+		`texture_diffuse = "monument_diffuse.dds"`, `texture_normal = "statue_normal.dds"`,
+		`texture_specular = "monument_properties.dds"`, `shader = "standard"`, `shader_file = "gfx/FX/pdxmesh.shader"`,
+		`name = "monument_entity"`, `pdxmesh = "monument_mesh"`,
+	} {
+		if !strings.Contains(string(text), line) {
+			t.Errorf("the asset has no %s:\n%s", line, text)
+		}
+	}
+
+	// The game loads it, the normal map not chosen found where it was.
+	set := folders.Open([]folders.Source{{Name: "game", Path: game}, {Name: "mod", Path: mod}})
+
+	built, _, err := entity.NewLoader(set, asset.Load(set)).Load("monument_entity")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files := built.Parts[0].Textures.Files
+	if files.Diffuse.Relative != "gfx/models/monument/monument_diffuse.dds" || files.Normal.Relative != "gfx/models/statue/statue_normal.dds" {
+		t.Errorf("the new entity draws %+v", files)
+	}
+
+	if c, _ := built.Parts[0].Textures.Diffuse.Colour(3, 3); c[1] < 190 || c[0] > 10 {
+		t.Errorf("the new entity's diffuse = %v, want the green painted", c)
+	}
+
+	// The files it came from are as they were.
+	if _, err := os.Stat(filepath.Join(game, "gfx", "models", "statue", "statue_diffuse.dds.bak")); !os.IsNotExist(err) {
+		t.Error("the original was written over")
+	}
+}
+
+// A plan that cannot be carried out is refused before anything is written.
+func TestPlanIsChecked(t *testing.T) {
+	manifest, _ := prepared(t, Options{})
+	exported := export(t, manifest)
+
+	cases := map[string]Plan{
+		"no folder":       {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds"}}},
+		"no set":          {Maps: []PlannedMap{{Set: "nothing", Kind: Diffuse, File: "a.dds"}}},
+		"a path":          {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "sub/a.dds"}}},
+		"wrong extension": {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.png", Format: "BC7"}}},
+		"no format":       {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds", Format: "ATI2"}}},
+		"one file twice":  {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds"}, {Set: "statue", Kind: Normal, File: "A.dds"}}},
+		"no entity name":  {Asset: &PlannedAsset{File: "a.asset", Mesh: "a_mesh"}},
+	}
+
+	for name, plan := range cases {
+		out := t.TempDir()
+		if plan.Folder == "" && name != "no folder" {
+			plan.Folder = out
+		}
+
+		if _, err := Pack(manifest, PackOptions{Exported: exported, Plan: &plan}); err == nil {
+			t.Errorf("%s: carried out", name)
+		}
+
+		if entries, _ := os.ReadDir(out); len(entries) != 0 {
+			t.Errorf("%s: written before refusing: %v", name, entries)
+		}
 	}
 }

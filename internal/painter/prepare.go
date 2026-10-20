@@ -60,9 +60,28 @@ func Prepare(opened *locate.Opened, entityName, folder string, options Options) 
 		manifest.Diagnostics = append(manifest.Diagnostics, diagnostic.String())
 	}
 
+	if found, ok := opened.MeshFile(entityName); ok {
+		manifest.MeshFile = &SourceFile{Path: found.Path, Relative: found.Relative}
+	}
+
 	groups := group(built, options.Attachments, manifest)
 	if len(groups) == 0 {
 		return nil, fmt.Errorf("entity %s draws no part with a texture to paint", entityName)
+	}
+
+	// How each mesh is drawn, as the entity's own mesh settings say, which an
+	// asset written for it keeps.
+	for index := range groups {
+		for position := range groups[index].meshes {
+			ref := &groups[index].meshes[position]
+
+			if settings, ok := opened.MeshSettings(entityName, ref.Shape, ref.Index); ok {
+				ref.ShaderFile = settings.ShaderFile
+				ref.ShaderDefines = settings.ShaderDefines
+				ref.Subpass = settings.Subpass
+				ref.ShadowOnly = settings.ShadowOnly
+			}
+		}
 	}
 
 	cache := map[string]*image.NRGBA{}
@@ -100,6 +119,10 @@ type partGroup struct {
 	// planned are the maps the group is to have that are not there yet, by
 	// kind, which packing makes.
 	planned map[string]Map
+
+	// meshes are the meshes of the mesh file the parts are, for the mesh
+	// settings of an asset written for them.
+	meshes []MeshRef
 }
 
 // group gathers the parts that are painted into Texture Sets: those drawn
@@ -110,8 +133,16 @@ func group(built *model.Model, attachments bool, manifest *Manifest) []partGroup
 
 	taken := map[string]bool{}
 
+	// The place of each mesh among its shape's, which the mesh settings
+	// name, counted over every part, drawn or not.
+	places := map[string]int{}
+
 	for index := range built.Parts {
 		part := &built.Parts[index]
+		shape := fmt.Sprintf("%d|%s|%s", part.Attachment, part.Entity, part.Name)
+		place := places[shape]
+		places[shape]++
+
 		files := part.Textures.Files
 
 		if part.Attachment != 0 && !attachments || part.ShadowOnly {
@@ -142,6 +173,10 @@ func group(built *model.Model, attachments bool, manifest *Manifest) []partGroup
 		}
 
 		groups[at].parts = append(groups[at].parts, part)
+
+		if part.Attachment == 0 {
+			groups[at].meshes = append(groups[at].meshes, MeshRef{Shape: part.Name, Index: place, Shader: part.Shader})
+		}
 	}
 
 	return groups
@@ -265,6 +300,8 @@ func prepareSet(g *partGroup, folder string, options Options, cache map[string]*
 	if err := os.MkdirAll(channels, 0o755); err != nil {
 		return set, err
 	}
+
+	set.Meshes = append([]MeshRef{}, g.meshes...)
 
 	set.Coverage = filepath.Join(channels, "coverage.png")
 	if err := writePNG(set.Coverage, coverage(g, set.Width, set.Height)); err != nil {

@@ -116,18 +116,22 @@ def preset_name(texture_set):
     return "pdx-painter " + texture_set["name"]
 
 
-def export_config(manifest, export_path):
+def export_config(manifest, export_path, only=None):
     """The configuration of Painter's export that writes every channel of the
     manifest the way pdx-painter's pack reads them: one PNG of eight bits per
     channel, named after the Texture Set and the channel.
 
     Every Texture Set gets a preset of its own, since not every set has every
-    channel.
+    channel. With only, a collection of Texture Set names, only those are
+    exported.
     """
     presets = []
     export_list = []
 
     for texture_set in manifest["textureSets"]:
+        if only is not None and texture_set["name"] not in only:
+            continue
+
         maps = []
 
         for channel in texture_set["channels"]:
@@ -186,12 +190,15 @@ def export_question(manifest):
     buttons, for writing in place and for choosing another folder."""
     if manifest["kind"] == "mesh":
         new = any(stored.get("new") for texture_set in manifest["textureSets"] for stored in texture_set["maps"].values())
+        name = os.path.basename(manifest["asset"])
+
+        details = "Next to the mesh, they are named after it, such as {0}_diffuse.dds".format(os.path.splitext(name)[0])
+        details += ", and the maps that are not there yet are made there." if new else "."
+        details += " In another folder, they go straight into it."
 
         return {
-            "text": "Where should the textures of {0} go?".format(os.path.basename(manifest["asset"])),
-            "details": ("Next to the mesh, they are named the way its material names them"
-                        + (", and the maps that are not there yet are made there." if new else ".")
-                        + " In another folder, they go straight into it."),
+            "text": "Where should the textures of {0} go?".format(name),
+            "details": details,
             "inPlace": "Save Next to the Mesh",
             "elsewhere": "Save into Another Folder...",
             "folderTitle": "Save the textures into",
@@ -234,3 +241,207 @@ def check_manifest(manifest):
     version = manifest.get("version")
     if version != MANIFEST_VERSION:
         raise ToolError("the manifest is of version {0}, the plugin reads {1}; install matching versions".format(version, MANIFEST_VERSION))
+
+
+# --- Advanced export ----------------------------------------------------------
+
+# The kinds of map a Texture Set has, in the order the dialog lists them, with
+# what it calls them.
+MAP_KINDS = [("diffuse", "Diffuse"), ("normal", "Normal"), ("properties", "Properties")]
+
+# The formats a map can be written in, by the names pdx-painter takes, with
+# what the dialog calls them. The empty one keeps the format it was read in.
+FORMATS = [("", "Keep"), ("BC1", "DXT1"), ("BC3", "DXT5"), ("BC7", "BC7"), ("BGRA8", "Uncompressed")]
+
+FORMAT_NAMES = {"BC1": "DXT1", "BC3": "DXT5", "BC7": "BC7", "BGRA8": "Uncompressed", "RGBA8": "Uncompressed",
+                "PNG": "PNG", "TGA": "TGA"}
+
+
+def keep_label(stored):
+    """What the dialog calls keeping a map's format: Keep (DXT5)."""
+    return "Keep ({0})".format(FORMAT_NAMES.get(stored.get("format", ""), stored.get("format", "")))
+
+
+def stem(path):
+    """A file's name without its folder and extension."""
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def default_name(manifest):
+    """The name an advanced export starts with: the mesh's for a mesh, the
+    entity's without its _entity for an entity."""
+    name = manifest["entity"]
+    if manifest["kind"] != "mesh" and name.endswith("_entity"):
+        name = name[:-len("_entity")]
+
+    return name
+
+
+def default_folder(manifest):
+    """The folder an advanced export starts in: the one of the file opened."""
+    return os.path.dirname(manifest["asset"])
+
+
+def derives_by_default(manifest):
+    """Whether an advanced export starts deriving every name from one: for a
+    mesh, whose names are derived already, but not for an entity, whose names
+    are kept as they are."""
+    return manifest["kind"] == "mesh"
+
+
+def map_extension(stored, chosen=""):
+    """The extension a map is written with: that of the format chosen, or kept
+    from the one it was read in."""
+    format_name = chosen or stored.get("format", "")
+
+    return {"PNG": ".png", "TGA": ".tga"}.get(format_name, ".dds")
+
+
+def derived_names(manifest, name, chosen=None):
+    """Every file name an advanced export writes, derived from one name: the
+    asset and mesh by it, and the maps of the first Texture Set by it and of the
+    others by it and their number. chosen are the formats chosen for the maps,
+    by (set, kind), which say their extensions.
+
+    Returns {"asset": ..., "mesh": ..., "maps": {(set, kind): ...}}.
+    """
+    chosen = chosen or {}
+    names = {"asset": name + ".asset", "mesh": name + ".mesh", "maps": {}}
+
+    for number, texture_set in enumerate(manifest["textureSets"]):
+        prefix = name if number == 0 else "{0}_{1}".format(name, number + 1)
+
+        for kind, _ in MAP_KINDS:
+            stored = texture_set["maps"].get(kind)
+            if stored:
+                key = (texture_set["name"], kind)
+                names["maps"][key] = "{0}_{1}{2}".format(prefix, kind, map_extension(stored, chosen.get(key, "")))
+
+    return names
+
+
+def existing_names(manifest):
+    """The file names of what was opened, which an advanced export of an entity
+    starts with: the asset's, the mesh's and each map's own."""
+    if manifest["kind"] == "mesh":
+        names = derived_names(manifest, default_name(manifest))
+    else:
+        names = {"asset": os.path.basename(manifest["asset"]), "maps": {}}
+
+    mesh_file = manifest.get("meshFile")
+    names["mesh"] = os.path.basename(mesh_file["path"]) if mesh_file else default_name(manifest) + ".mesh"
+
+    for texture_set in manifest["textureSets"]:
+        for kind, _ in MAP_KINDS:
+            stored = texture_set["maps"].get(kind)
+            if stored:
+                names["maps"][(texture_set["name"], kind)] = os.path.basename(stored["relative"])
+
+    return names
+
+
+def asset_definitions(asset_file):
+    """The names of the pdxmesh and the entity an asset of a file name defines:
+    house_mesh and house_entity for house.asset."""
+    name = stem(asset_file)
+
+    return name + "_mesh", name + "_entity"
+
+
+def can_write_mesh(manifest):
+    """Whether the mesh can be copied, and an asset written: only where the
+    mesh file is known."""
+    return bool(manifest.get("meshFile"))
+
+
+def can_write_asset(manifest):
+    """Whether an asset can be written: one needs the mesh file, and a mesh of
+    it to give mesh settings."""
+    return can_write_mesh(manifest) and any(texture_set.get("meshes") for texture_set in manifest["textureSets"])
+
+
+def build_plan(folder, asset=None, mesh=None, maps=()):
+    """The plan pdx-painter's pack carries out, from what the dialog chose.
+
+    asset and mesh are the file names to write them as, or None; maps are
+    (set, kind, file, format, extension) for each map chosen, the extension
+    being what its file is to end in, which pack does not read.
+    """
+    plan = {"folder": folder, "maps": []}
+
+    for texture_set, kind, file, format_name, extension in maps:
+        planned = {"set": texture_set, "kind": kind, "file": file, "extension": extension}
+        if format_name:
+            planned["format"] = format_name
+
+        plan["maps"].append(planned)
+
+    if mesh:
+        plan["mesh"] = {"file": mesh}
+
+    if asset:
+        mesh_name, entity_name = asset_definitions(asset)
+        plan["asset"] = {"file": asset, "mesh": mesh_name, "entity": entity_name}
+
+    return plan
+
+
+def plan_problems(plan):
+    """What is wrong with a plan, as the dialog says it before exporting: an
+    empty or wrong file name, or one file chosen twice. Empty when nothing is."""
+    problems = []
+
+    if not plan["folder"].strip():
+        problems.append("Choose a folder to export into.")
+
+    files = []
+
+    def check(what, file, extension):
+        if not file.strip():
+            problems.append("Give the {0} a file name.".format(what))
+        elif os.path.basename(file) != file:
+            problems.append("The {0} is to be a file name, not a path: {1}".format(what, file))
+        elif not file.lower().endswith(extension):
+            problems.append("The {0} {1} is to end in {2}.".format(what, file, extension))
+        else:
+            files.append(file.lower())
+
+    if not plan["maps"] and "mesh" not in plan and "asset" not in plan:
+        problems.append("Choose something to export.")
+
+    for planned in plan["maps"]:
+        check("{0} map of {1}".format(planned["kind"], planned["set"]), planned["file"], planned.get("extension", ".dds"))
+
+    if "mesh" in plan:
+        check("mesh", plan["mesh"]["file"], ".mesh")
+
+    if "asset" in plan:
+        check("asset", plan["asset"]["file"], ".asset")
+
+    for file in sorted(set(name for name in files if files.count(name) > 1)):
+        problems.append("{0} is chosen for two files.".format(file))
+
+    return problems
+
+
+def existing_files(plan):
+    """The files a plan writes over, which the dialog warns of."""
+    names = [planned["file"] for planned in plan["maps"]]
+    names += [plan[key]["file"] for key in ("mesh", "asset") if key in plan]
+
+    return [name for name in names if name and os.path.isfile(os.path.join(plan["folder"], name))]
+
+
+def inside_game(manifest, folder):
+    """Whether a folder is inside the game's own installation, for an entity
+    of the game, whose files Steam puts back when it updates or checks it."""
+    if manifest["kind"] != "game" or not folder.strip():
+        return False
+
+    root = os.path.normcase(os.path.abspath(manifest["root"]))
+    folder = os.path.normcase(os.path.abspath(folder))
+
+    try:
+        return os.path.commonpath([root, folder]) == root
+    except ValueError:  # on different drives
+        return False

@@ -6,7 +6,7 @@
 //	pdx-painter list <file.asset>
 //	pdx-painter prepare -asset <file.asset> -entity <name> -out <folder> [-game <folder>] [-attachments] [-flip-green]
 //	pdx-painter prepare -mesh <file.mesh> -out <folder> [-flip-green]
-//	pdx-painter pack -manifest <manifest.json> -exported <folder> (-out <folder> | -in-place) [-no-backup] [-dry-run]
+//	pdx-painter pack -manifest <manifest.json> -exported <folder> (-out <folder> | -in-place | -plan <plan.json>) [-no-backup] [-dry-run]
 //
 // Every command writes what it did as one JSON object to standard output, or
 // {"error": "..."} and exits with 1.
@@ -147,24 +147,42 @@ func pack(args []string) (any, error) {
 	noBackup := flags.Bool("no-backup", false, "do not keep a .bak of the files written over")
 	dryRun := flags.Bool("dry-run", false, "say what would be written without writing it")
 	inPlace := flags.Bool("in-place", false, "write every map over the file it was read from, in place of -out")
+	planPath := flags.String("plan", "", "a JSON plan of what to write where, in place of -out and -in-place")
 
 	if err := flags.Parse(args); err != nil {
 		return nil, err
 	}
 
-	if *manifestPath == "" || *exported == "" || *out == "" && !*inPlace {
-		return nil, errors.New("pack needs -manifest, -exported and -out or -in-place")
-	}
-
-	data, err := os.ReadFile(*manifestPath)
-	if err != nil {
-		return nil, err
+	if *manifestPath == "" || *exported == "" || *out == "" && !*inPlace && *planPath == "" {
+		return nil, errors.New("pack needs -manifest, -exported, and -out, -in-place or -plan")
 	}
 
 	var manifest painter.Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("read %s: %w", *manifestPath, err)
+	if err := readJSON(*manifestPath, &manifest); err != nil {
+		return nil, err
 	}
 
-	return painter.Pack(&manifest, painter.PackOptions{Exported: *exported, Out: *out, Backup: !*noBackup, DryRun: *dryRun, InPlace: *inPlace})
+	options := painter.PackOptions{Exported: *exported, Out: *out, Backup: !*noBackup, DryRun: *dryRun, InPlace: *inPlace}
+
+	if *planPath != "" {
+		options.Plan = &painter.Plan{}
+		if err := readJSON(*planPath, options.Plan); err != nil {
+			return nil, err
+		}
+	}
+
+	return painter.Pack(&manifest, options)
+}
+
+func readJSON(path string, into any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(data, into); err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	return nil
 }

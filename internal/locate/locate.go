@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -102,6 +103,33 @@ func Locate(file string) (Location, error) {
 	}
 
 	return location, nil
+}
+
+// Below works out the root of the game or mod a folder is in, as Locate does
+// for a file in it, and the folder's path below that root with forward
+// slashes. It is false for a folder in no gfx folder.
+func Below(folder string) (root, relative string, ok bool) {
+	absolute, err := filepath.Abs(folder)
+	if err != nil {
+		return "", "", false
+	}
+
+	gfx, ok := enclosingGfx(filepath.Join(absolute, "file"))
+	if !ok {
+		return "", "", false
+	}
+
+	root = filepath.Dir(gfx)
+	if isLayer(root) {
+		root = filepath.Dir(root)
+	}
+
+	relative, err = filepath.Rel(root, absolute)
+	if err != nil {
+		return "", "", false
+	}
+
+	return root, filepath.ToSlash(relative), true
 }
 
 // knownLayers are the layers Europa Universalis 5 splits its files into.
@@ -220,6 +248,70 @@ type Opened struct {
 	// Diagnostics are problems with the folders, such as a mod read without
 	// its game.
 	Diagnostics report.Diagnostics
+
+	files  entity.Files
+	assets *asset.Assets
+}
+
+// MeshSettings finds the mesh settings of one mesh of an entity's mesh file,
+// as the loader does: of its pdxmesh, overridden by the entity's own, the last
+// that names the shape, whatever its case, and the mesh's index, or failing
+// that the last that names the shape.
+func (o *Opened) MeshSettings(name, shape string, index int) (asset.MeshSettings, bool) {
+	var all []asset.MeshSettings
+
+	if definition, ok := o.assets.MeshOf(name); ok {
+		all = append(all, definition.Settings...)
+	}
+
+	if entity, ok := o.assets.Entities.Get(name); ok {
+		all = append(all, entity.Settings...)
+	}
+
+	var byName *asset.MeshSettings
+
+	for position := len(all) - 1; position >= 0; position-- {
+		settings := &all[position]
+		if !strings.EqualFold(settings.Name, shape) {
+			continue
+		}
+
+		if settings.Index == index {
+			return *settings, true
+		}
+
+		if byName == nil {
+			byName = settings
+		}
+	}
+
+	if byName != nil {
+		return *byName, true
+	}
+
+	return asset.MeshSettings{}, false
+}
+
+// MeshFile finds the .mesh file an entity draws: the one its pdxmesh, or
+// that of an entity it clones, names. A loose file's is looked for by its
+// name next to it as well, as its loader looks for it.
+func (o *Opened) MeshFile(name string) (folders.File, bool) {
+	definition, ok := o.assets.MeshOf(name)
+	if !ok {
+		return folders.File{}, false
+	}
+
+	if found, ok := o.files.Find(asset.Resolve(definition.Origin(), definition.File)); ok {
+		return found, true
+	}
+
+	if o.Location.Kind != Loose {
+		return folders.File{}, false
+	}
+
+	base := path.Base(strings.ReplaceAll(definition.File, "\\", "/"))
+
+	return o.files.Find(path.Join(path.Dir(definition.Origin().File), base))
 }
 
 // Open reads the definitions an asset file's entities are loaded with: those
@@ -238,7 +330,10 @@ func Open(location Location, game string) (*Opened, error) {
 		parsed := database.ParseFiles([]folders.File{file}, &report.Collector{})
 		assets := asset.Read(parsed[0].Document, file, &report.Collector{})
 
-		loader := entity.NewLoader(entity.Folder{Path: location.Root, Name: filepath.Base(location.Root)}, assets)
+		folder := entity.Folder{Path: location.Root, Name: filepath.Base(location.Root)}
+		opened.files, opened.assets = folder, assets
+
+		loader := entity.NewLoader(folder, assets)
 		loader.MissingTexture = texture.Checkerboard()
 		loader.EmptyWithoutMesh = true
 		loader.ByName = true
@@ -272,7 +367,8 @@ func Open(location Location, game string) (*Opened, error) {
 
 	set := folders.Open(sources)
 	opened.Diagnostics = append(opened.Diagnostics, set.Diagnostics...)
-	opened.Loader = entity.NewLoader(set, asset.Load(set))
+	opened.files, opened.assets = set, asset.Load(set)
+	opened.Loader = entity.NewLoader(set, opened.assets)
 
 	return opened, nil
 }

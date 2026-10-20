@@ -31,6 +31,12 @@ type PackOptions struct {
 
 	// DryRun works out what would be written without writing it.
 	DryRun bool
+
+	// Plan says what is written, where and how, in place of Out and InPlace:
+	// the maps chosen, each by a name and in a format of its own, and a copy
+	// of the mesh and an asset for them, which is how an entity changed is
+	// saved as a new one. See plan.go.
+	Plan *Plan
 }
 
 // Packed is what packing did.
@@ -47,15 +53,18 @@ type Packed struct {
 }
 
 // target is a map being packed: the original's pixels with what Painter
-// exported laid over them.
+// exported laid over them, and where and how it is written.
 type target struct {
 	stored   Map
 	original *image.NRGBA
 	pixels   *image.NRGBA
+
+	destination string
+	format      string
 }
 
 // Pack lays the channels Painter exported into the maps they came from and
-// writes the maps.
+// writes the maps, and with a plan, the mesh and an asset as well.
 //
 // Two Texture Sets drawn with one map both lay their channels into it, the
 // later over the earlier.
@@ -64,7 +73,11 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 		return nil, fmt.Errorf("the manifest is of version %d, this tool reads %d", manifest.Version, Version)
 	}
 
-	if options.Out == "" && !options.InPlace {
+	if options.Plan != nil {
+		if err := options.Plan.check(manifest); err != nil {
+			return nil, err
+		}
+	} else if options.Out == "" && !options.InPlace {
 		return nil, fmt.Errorf("no folder to write the textures below")
 	}
 
@@ -91,6 +104,11 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 				return nil, fmt.Errorf("texture set %s has no %s map for its channel %s", set.Name, channel.Map, channel.ID)
 			}
 
+			destination, format, wanted := options.where(set.Name, channel.Map, stored)
+			if !wanted {
+				continue
+			}
+
 			exported := filepath.Join(options.Exported, set.Name+"_"+channel.ID+".png")
 			if _, err := os.Stat(exported); err != nil {
 				packed.Notes = append(packed.Notes, fmt.Sprintf("%s of %s was not exported; kept as it was", channel.ID, set.Name))
@@ -105,7 +123,7 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 
 			into, ok := targets[stored.Path]
 			if !ok {
-				into = &target{stored: stored}
+				into = &target{stored: stored, destination: destination, format: format}
 
 				if stored.New {
 					// A new map is as large as Painter painted it.
@@ -120,6 +138,9 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 
 				targets[stored.Path] = into
 				order = append(order, stored.Path)
+			} else if !sameFile(into.destination, destination) {
+				return nil, fmt.Errorf("%s is drawn by two Texture Sets and would be written to both %s and %s; give them one name",
+					stored.Relative, into.destination, destination)
 			}
 
 			img = resize(img, into.pixels.Rect.Dx(), into.pixels.Rect.Dy())
@@ -139,57 +160,117 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 		}
 	}
 
-	// Two maps of one name from different folders would land on one file in
-	// a folder of their own, which is refused before anything is written.
+	// Two files of one name would land on one file, which is refused before
+	// anything is written.
 	destinations := map[string]string{}
-
-	for _, path := range order {
-		stored := targets[path].stored
-
-		destination := stored.Path
-		if !options.InPlace {
-			destination = filepath.Join(options.Out, filepath.Base(filepath.FromSlash(stored.Relative)))
-		}
-
+	claim := func(destination, what string) error {
 		key := strings.ToLower(filepath.Clean(destination))
 		if other, ok := destinations[key]; ok {
-			return nil, fmt.Errorf("%s and %s would both be written to %s; save them over the files they came from instead", other, stored.Relative, destination)
+			return fmt.Errorf("%s and %s would both be written to %s; give them names of their own", other, what, destination)
 		}
 
-		destinations[key] = stored.Relative
+		destinations[key] = what
+
+		return nil
+	}
+
+	for _, path := range order {
+		if err := claim(targets[path].destination, targets[path].stored.Relative); err != nil {
+			return nil, err
+		}
+	}
+
+	plan := options.Plan
+	if plan != nil && plan.Mesh != nil {
+		if err := claim(plan.path(plan.Mesh.File), "the mesh"); err != nil {
+			return nil, err
+		}
+	}
+
+	if plan != nil && plan.Asset != nil {
+		if err := claim(plan.path(plan.Asset.File), "the asset"); err != nil {
+			return nil, err
+		}
 	}
 
 	for _, path := range order {
 		into := targets[path]
 
-		if into.original != nil && bytes.Equal(into.pixels.Pix, into.original.Pix) {
+		// Written again only when it changes, since every write of a
+		// compressed map loses a little: in what it holds, or how it is
+		// stored, or, with a plan, which names every map it wants, where it
+		// is.
+		moved := plan != nil && !sameFile(into.destination, into.stored.Path)
+
+		if into.original != nil && bytes.Equal(into.pixels.Pix, into.original.Pix) && into.format == into.stored.Format && !moved {
 			packed.Unchanged = append(packed.Unchanged, into.stored.Relative)
 
 			continue
 		}
 
-		destination := into.stored.Path
-		if !options.InPlace {
-			destination = filepath.Join(options.Out, filepath.Base(filepath.FromSlash(into.stored.Relative)))
+		stored := into.stored
+		if into.format != stored.Format {
+			stored.Format = into.format
+
+			// A file of one level, as a PNG is, gets every level as a DDS.
+			if stored.Levels <= 1 {
+				stored.Levels = 99
+			}
 		}
 
-		data, err := encode(into.pixels, into.stored)
+		data, err := encode(into.pixels, stored)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", into.stored.Relative, err)
 		}
 
 		if !options.DryRun {
-			if err := write(destination, data, options.Backup); err != nil {
+			if err := write(into.destination, data, options.Backup); err != nil {
 				return nil, err
 			}
 		}
 
-		packed.Written = append(packed.Written, destination)
+		packed.Written = append(packed.Written, into.destination)
+	}
+
+	if plan != nil {
+		if err := plan.writeMeshAndAsset(manifest, options, packed); err != nil {
+			return nil, err
+		}
 	}
 
 	slices.Sort(packed.Unchanged)
 
 	return packed, nil
+}
+
+// where says where a map of a Texture Set is written, and in which format,
+// or that it is not written at all, which only a plan leaves a map out by.
+func (o PackOptions) where(set, kind string, stored Map) (destination, format string, wanted bool) {
+	switch {
+	case o.Plan != nil:
+		planned, ok := o.Plan.mapOf(set, kind)
+		if !ok {
+			return "", "", false
+		}
+
+		format = stored.Format
+		if planned.Format != "" {
+			format = planned.Format
+		}
+
+		return o.Plan.path(planned.File), format, true
+
+	case o.InPlace:
+		return stored.Path, stored.Format, true
+	}
+
+	return filepath.Join(o.Out, filepath.Base(filepath.FromSlash(stored.Relative))), stored.Format, true
+}
+
+// sameFile reports whether two paths name one file, whatever their case, as
+// they do on Windows.
+func sameFile(a, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 // blank is a new map of a kind before anything is laid into it.

@@ -30,8 +30,12 @@ or newer.
 - **An `.asset` file:** pick the entity to open. The game, DLC or mod the file
   belongs to is worked out from where it is. A mod is read together with its
   game, whose folder the plugin asks for once.
-- **A `.mesh` file:** opens the textures its material names that are next to
-  it. Textures that are missing are created on export, as DXT5.
+- **A `.mesh` file:** the textures are named after the mesh file, such as
+  `house_diffuse.dds`, `house_normal.dds` and `house_properties.dds`, and not
+  after the names inside the mesh. A mesh with several shapes gets a Texture
+  Set for each, the ones after the first numbered (`house_2_diffuse.dds`).
+  Textures of these names next to the mesh are opened. Missing ones are
+  created on export, as DXT5.
 
 Every Texture Set gets a fill layer holding the game's maps. Paint on layers
 above it.
@@ -40,6 +44,23 @@ above it.
 the files came from (or save next to the mesh), or to save them into another
 folder as flat files. Every file written over is kept once as `.bak`. Maps that
 come back unchanged are not written again.
+
+**PDX Painter → Advanced Export...** saves what you opened as something new,
+leaving the files it came from alone. Choose a folder and tick what to write:
+
+- **Asset:** `<name>.asset`, with a `pdxmesh` `<name>_mesh` and an entity
+  `<name>_entity`. The `meshsettings` keep the shaders, shader files, defines
+  and subpasses of the original. Maps that aren't written are named where they
+  are.
+- **Mesh:** a copy of the `.mesh`, since Painter does not change geometry.
+- **Diffuse, normal and properties** of each Texture Set, each in a format of
+  your choosing, or kept in the one it was read in. These are ticked by
+  default.
+
+With **Derive every file name from the name** ticked, one name gives all of
+them: `<name>.mesh`, `<name>_diffuse.dds` and so on, numbered for every Texture
+Set after the first. Untick it to name each file yourself. It starts ticked
+for a mesh, and unticked with the original names for an entity.
 
 Only the texels the model's UVs cover are taken from Painter, because the
 games share textures between models. The rest of each map stays as it was.
@@ -65,7 +86,7 @@ go install github.com/kaiser-chris/pdx-painter/cmd/pdx-painter@latest
 pdx-painter list file.asset
 pdx-painter prepare -asset file.asset -entity some_entity -out work
 pdx-painter prepare -mesh file.mesh -out work
-pdx-painter pack -manifest work/manifest.json -exported exported (-in-place | -out folder)
+pdx-painter pack -manifest work/manifest.json -exported exported (-in-place | -out folder | -plan plan.json)
 ```
 
 `prepare` writes an OBJ, a PNG per channel and a manifest. `pack` lays the

@@ -158,5 +158,105 @@ class TestRunTool(unittest.TestCase):
             core.run_tool(["version"], "Z:/no/pdx-painter.exe")
 
 
+def opened(kind="game", root="C:/Games/Victoria 3/game"):
+    """A manifest of two Texture Sets, as prepare writes one."""
+    return {
+        "version": 1,
+        "kind": kind,
+        "root": root,
+        "entity": "house_entity" if kind != "mesh" else "house",
+        "asset": root + "/gfx/models/house/house." + ("mesh" if kind == "mesh" else "asset"),
+        "meshFile": {"path": root + "/gfx/models/house/house_model.mesh", "relative": "gfx/models/house/house_model.mesh"},
+        "textureSets": [
+            {"name": "house", "meshes": [{"shape": "houseShape", "index": 0}], "channels": [], "maps": {
+                "diffuse": {"relative": "gfx/models/house/house_diffuse.dds", "format": "BC1"},
+                "normal": {"relative": "gfx/models/house/house_normal.dds", "format": "BC3"},
+                "properties": {"relative": "gfx/models/house/house_properties.dds", "format": "BC3"},
+            }},
+            {"name": "decal", "meshes": [], "channels": [], "maps": {
+                "diffuse": {"relative": "gfx/models/shared/decal.png", "format": "PNG"},
+            }},
+        ],
+    }
+
+
+class TestAdvancedExport(unittest.TestCase):
+    def test_defaults_of_an_entity_and_of_a_mesh(self):
+        entity = opened()
+        self.assertEqual(core.default_name(entity), "house")
+        self.assertFalse(core.derives_by_default(entity))
+        self.assertTrue(core.derives_by_default(opened("mesh")))
+        self.assertEqual(core.default_folder(entity), "C:/Games/Victoria 3/game/gfx/models/house")
+
+    def test_the_names_of_what_was_opened(self):
+        names = core.existing_names(opened())
+        self.assertEqual(names["asset"], "house.asset")
+        self.assertEqual(names["mesh"], "house_model.mesh")
+        self.assertEqual(names["maps"][("house", "diffuse")], "house_diffuse.dds")
+        self.assertEqual(names["maps"][("decal", "diffuse")], "decal.png")
+
+    def test_names_derived_from_one(self):
+        names = core.derived_names(opened(), "villa")
+        self.assertEqual((names["asset"], names["mesh"]), ("villa.asset", "villa.mesh"))
+        self.assertEqual(names["maps"][("house", "normal")], "villa_normal.dds")
+
+        # The second set is numbered, and keeps the PNG it was read as, until
+        # another format is chosen.
+        self.assertEqual(names["maps"][("decal", "diffuse")], "villa_2_diffuse.png")
+        chosen = core.derived_names(opened(), "villa", {("decal", "diffuse"): "BC7"})
+        self.assertEqual(chosen["maps"][("decal", "diffuse")], "villa_2_diffuse.dds")
+
+    def test_the_definitions_of_an_asset(self):
+        self.assertEqual(core.asset_definitions("villa.asset"), ("villa_mesh", "villa_entity"))
+
+    def test_what_can_be_written(self):
+        self.assertTrue(core.can_write_asset(opened()))
+        unknown = dict(opened(), meshFile=None)
+        self.assertFalse(core.can_write_mesh(unknown))
+        self.assertFalse(core.can_write_asset(unknown))
+
+    def test_a_plan_and_its_problems(self):
+        plan = core.build_plan("D:/mods/villa", asset="villa.asset", mesh="villa.mesh", maps=[
+            ("house", "diffuse", "villa_diffuse.dds", "BC7", ".dds"),
+            ("house", "normal", "villa_normal.dds", "", ".dds"),
+        ])
+
+        self.assertEqual(plan["asset"], {"file": "villa.asset", "mesh": "villa_mesh", "entity": "villa_entity"})
+        self.assertEqual(plan["maps"][0]["format"], "BC7")
+        self.assertNotIn("format", plan["maps"][1])
+        self.assertEqual(core.plan_problems(plan), [])
+
+        bad = core.build_plan("", mesh="villa.obj", maps=[
+            ("house", "diffuse", "same.dds", "", ".dds"),
+            ("house", "normal", "SAME.dds", "", ".dds"),
+            ("house", "properties", "", "", ".dds"),
+        ])
+        problems = " ".join(core.plan_problems(bad))
+        for expected in ["Choose a folder", "is to end in .mesh", "same.dds is chosen for two files", "Give the properties map"]:
+            self.assertIn(expected, problems)
+
+        self.assertEqual(core.plan_problems(core.build_plan("D:/x")), ["Choose something to export."])
+
+    def test_files_written_over(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "villa_diffuse.dds"), "wb").close()
+            plan = core.build_plan(folder, maps=[
+                ("house", "diffuse", "villa_diffuse.dds", "", ".dds"),
+                ("house", "normal", "villa_normal.dds", "", ".dds"),
+            ])
+
+            self.assertEqual(core.existing_files(plan), ["villa_diffuse.dds"])
+
+    def test_inside_the_game(self):
+        entity = opened()
+        self.assertTrue(core.inside_game(entity, "C:/Games/Victoria 3/game/gfx/models/house"))
+        self.assertFalse(core.inside_game(entity, "D:/mods/villa"))
+        self.assertFalse(core.inside_game(opened("mod", "D:/mods/mine"), "D:/mods/mine/gfx"))
+
+    def test_only_the_sets_chosen_are_exported(self):
+        config = core.export_config(opened(), "C:/out", only={"decal"})
+        self.assertEqual([entry["rootPath"] for entry in config["exportList"]], ["decal"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,6 +72,7 @@ def start():
     menu = QtWidgets.QMenu(TITLE, window)
     menu.addAction("Open Entity or Mesh...").triggered.connect(_guarded(open_file))
     menu.addAction("Export Textures...").triggered.connect(_guarded(export_textures))
+    menu.addAction("Advanced Export...").triggered.connect(_guarded(advanced_export))
     menu.addSeparator()
     menu.addAction("Settings...").triggered.connect(_guarded(edit_settings))
 
@@ -382,39 +383,66 @@ def _metadata_value(metadata, key):
         return None
 
 
-def export_textures():
+def _opened_manifest():
+    """The manifest of the open project, and its metadata, or None where no
+    project is open or it was not opened with the plugin, which is said."""
     project = substance_painter.project
     if not project.is_open():
         _error("No project is open.")
-        return
+        return None
 
     metadata = project.Metadata(core.METADATA_CONTEXT)
     manifest = _metadata_value(metadata, "manifest")
     if not manifest:
         _error("This project was not opened with PDX Painter > Open Entity or Mesh, so there is nowhere to write its textures to.")
-        return
+        return None
 
     core.check_manifest(manifest)
+
+    return manifest, metadata
+
+
+def export_textures():
+    opened = _opened_manifest()
+    if opened is None:
+        return
+
+    manifest, metadata = opened
 
     where = _ask_where(manifest, metadata)
     if where is None:
         return
 
+    _export_and_pack(manifest, where)
+
+
+def _export_and_pack(manifest, where, only=None, plan=None):
+    """Export the channels from Painter, and have pdx-painter pack them as the
+    arguments where say, or as a plan says. With only, a collection of
+    Texture Set names, only those are exported from Painter."""
     exported = tempfile.mkdtemp(prefix="pdx-painter-")
     try:
-        _busy()
-        try:
-            result = substance_painter.export.export_project_textures(core.export_config(manifest, exported))
-        finally:
-            _idle()
+        if only is None or only:
+            _busy()
+            try:
+                result = substance_painter.export.export_project_textures(core.export_config(manifest, exported, only))
+            finally:
+                _idle()
 
-        if result.status != substance_painter.export.ExportStatus.Success:
-            _error("Painter's export did not finish: {0}".format(result.message))
-            return
+            if result.status != substance_painter.export.ExportStatus.Success:
+                _error("Painter's export did not finish: {0}".format(result.message))
+                return
 
         manifest_file = os.path.join(exported, "manifest.json")
         with open(manifest_file, "w", encoding="utf-8") as file:
             json.dump(manifest, file)
+
+        if plan is not None:
+            plan_file = os.path.join(exported, "plan.json")
+            with open(plan_file, "w", encoding="utf-8") as file:
+                json.dump(plan, file)
+
+            where = ["-plan", plan_file]
 
         packed = _run(["pack", "-manifest", manifest_file, "-exported", exported] + where)
     finally:
@@ -429,6 +457,241 @@ def export_textures():
         lines.append("Notes:\n" + "\n".join(packed["notes"]))
 
     QtWidgets.QMessageBox.information(_window(), TITLE, "\n\n".join(lines) or "Nothing to write.")
+
+
+# --- Advanced export ----------------------------------------------------------
+
+
+def advanced_export():
+    opened = _opened_manifest()
+    if opened is None:
+        return
+
+    manifest, metadata = opened
+
+    dialog = _AdvancedExport(manifest, _metadata_value(metadata, "advancedFolder") or core.default_folder(manifest))
+    if dialog.exec() != QtWidgets.QDialog.Accepted:
+        return
+
+    plan = dialog.plan()
+    metadata.set("advancedFolder", plan["folder"])
+
+    only = {planned["set"] for planned in plan["maps"]}
+    _export_and_pack(manifest, [], only=only, plan=plan)
+
+
+class _AdvancedExport(QtWidgets.QDialog):
+    """The dialog of an advanced export: a folder, a name the file names are
+    derived from or each file named on its own, and which of the asset, the
+    mesh and the maps to write, the maps in a format of their choosing."""
+
+    def __init__(self, manifest, folder):
+        super().__init__(_window())
+
+        self.manifest = manifest
+        self.setWindowTitle(TITLE + " - Advanced export")
+        self.setMinimumWidth(650)
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        top = QtWidgets.QGridLayout()
+        top.addWidget(QtWidgets.QLabel("Folder"), 0, 0)
+        self.folder = QtWidgets.QLineEdit(folder)
+        top.addWidget(self.folder, 0, 1)
+        browse = QtWidgets.QPushButton("Browse...")
+        browse.clicked.connect(self._browse)
+        top.addWidget(browse, 0, 2)
+
+        top.addWidget(QtWidgets.QLabel("Name"), 1, 0)
+        self.name = QtWidgets.QLineEdit(core.default_name(manifest))
+        top.addWidget(self.name, 1, 1)
+
+        self.derive = QtWidgets.QCheckBox("Derive every file name from the name")
+        self.derive.setChecked(core.derives_by_default(manifest))
+        top.addWidget(self.derive, 2, 1)
+        layout.addLayout(top)
+
+        # Each row is a checkbox, a file name and, for a map, a format.
+        self.rows = {}
+        grid = QtWidgets.QGridLayout()
+        grid.setColumnStretch(2, 1)
+        line = 0
+
+        line = self._heading(grid, line, "Files")
+
+        mesh_known = core.can_write_mesh(manifest)
+        asset_known = core.can_write_asset(manifest)
+
+        line = self._row(grid, line, "asset", "Asset", enabled=asset_known)
+        self.asset_hint = QtWidgets.QLabel()
+        self.asset_hint.setStyleSheet("color: gray;")
+        grid.addWidget(self.asset_hint, line, 2, 1, 2)
+        line += 1
+
+        line = self._row(grid, line, "mesh", "Mesh", enabled=mesh_known)
+
+        if not mesh_known:
+            note = QtWidgets.QLabel("The mesh file of this entity is not known, so neither it nor an asset can be written.")
+            note.setStyleSheet("color: gray;")
+            note.setWordWrap(True)
+            grid.addWidget(note, line, 1, 1, 3)
+            line += 1
+
+        for texture_set in manifest["textureSets"]:
+            line = self._heading(grid, line, "Texture Set " + texture_set["name"])
+
+            for kind, label in core.MAP_KINDS:
+                stored = texture_set["maps"].get(kind)
+                if stored:
+                    line = self._row(grid, line, (texture_set["name"], kind), label, checked=True, stored=stored)
+
+        layout.addLayout(grid)
+
+        self.warning = QtWidgets.QLabel()
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet("color: #d9a400;")
+        layout.addWidget(self.warning)
+
+        self.problems = QtWidgets.QLabel()
+        self.problems.setWordWrap(True)
+        self.problems.setStyleSheet("color: #e05252;")
+        layout.addWidget(self.problems)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        export = QtWidgets.QPushButton("Export")
+        export.setDefault(True)
+        export.clicked.connect(self._export)
+        buttons.addWidget(cancel)
+        buttons.addWidget(export)
+        layout.addLayout(buttons)
+
+        # The fields start with the names of what was opened, which deriving
+        # takes over; turned off again, it leaves the names derived to edit.
+        existing = core.existing_names(manifest)
+        self.rows["asset"]["file"].setText(existing["asset"])
+        self.rows["mesh"]["file"].setText(existing["mesh"])
+        for key, file in existing["maps"].items():
+            self.rows[key]["file"].setText(file)
+
+        self.name.textChanged.connect(self._update)
+        self.derive.toggled.connect(self._update)
+        self.folder.textChanged.connect(self._update)
+        for row in self.rows.values():
+            row["check"].toggled.connect(self._update)
+            row["file"].textChanged.connect(self._update)
+            if row["format"] is not None:
+                row["format"].currentIndexChanged.connect(self._update)
+
+        self._update()
+
+    def _heading(self, grid, line, text):
+        label = QtWidgets.QLabel(text)
+        label.setStyleSheet("color: gray; margin-top: 8px;")
+        grid.addWidget(label, line, 0, 1, 4)
+
+        return line + 1
+
+    def _row(self, grid, line, key, label, checked=False, enabled=True, stored=None):
+        check = QtWidgets.QCheckBox()
+        check.setChecked(checked and enabled)
+        check.setEnabled(enabled)
+        file = QtWidgets.QLineEdit()
+
+        grid.addWidget(check, line, 0)
+        grid.addWidget(QtWidgets.QLabel(label), line, 1)
+        grid.addWidget(file, line, 2)
+
+        format_box = None
+        if stored is not None:
+            format_box = QtWidgets.QComboBox()
+            for value, name in core.FORMATS:
+                format_box.addItem(core.keep_label(stored) if value == "" else name, value)
+            grid.addWidget(format_box, line, 3)
+
+        self.rows[key] = {"check": check, "file": file, "format": format_box, "stored": stored, "enabled": enabled}
+
+        return line + 1
+
+    def _browse(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export into", self.folder.text())
+        if folder:
+            self.folder.setText(folder)
+
+    def _chosen_formats(self):
+        return {key: row["format"].currentData() for key, row in self.rows.items() if row["format"] is not None}
+
+    def _update(self, *_):
+        derive = self.derive.isChecked()
+        self.name.setEnabled(derive)
+
+        if derive:
+            names = core.derived_names(self.manifest, self.name.text().strip(), self._chosen_formats())
+            self._set_file("asset", names["asset"])
+            self._set_file("mesh", names["mesh"])
+            for key, file in names["maps"].items():
+                self._set_file(key, file)
+
+        for row in self.rows.values():
+            row["file"].setEnabled(row["enabled"] and not derive)
+            if row["format"] is not None:
+                row["format"].setEnabled(row["check"].isChecked())
+
+        mesh_name, entity_name = core.asset_definitions(self.rows["asset"]["file"].text())
+        self.asset_hint.setText("with pdxmesh {0} and entity {1}".format(mesh_name, entity_name))
+
+        plan = self.plan()
+        existing = core.existing_files(plan)
+        warnings = []
+        if core.inside_game(self.manifest, plan["folder"]):
+            warnings.append("The folder is in the game's own files, which Steam puts back when it updates or checks the game.")
+        if existing:
+            warnings.append("Written over, a .bak kept of each: " + ", ".join(existing))
+
+        self.warning.setText("\n".join(warnings))
+        self.problems.setText("")
+
+    def _set_file(self, key, file):
+        field = self.rows[key]["file"]
+        if field.text() != file:
+            field.blockSignals(True)
+            field.setText(file)
+            field.blockSignals(False)
+
+    def plan(self):
+        """The plan of what the dialog has chosen."""
+        maps = []
+        for key, row in self.rows.items():
+            if isinstance(key, tuple) and row["check"].isChecked():
+                chosen = row["format"].currentData()
+                maps.append((key[0], key[1], row["file"].text().strip(), chosen,
+                             core.map_extension(row["stored"], chosen)))
+
+        def chosen(key):
+            row = self.rows[key]
+            return row["file"].text().strip() if row["check"].isChecked() else None
+
+        return core.build_plan(self.folder.text().strip(), asset=chosen("asset"), mesh=chosen("mesh"), maps=maps)
+
+    def _export(self):
+        plan = self.plan()
+
+        problems = core.plan_problems(plan)
+        if problems:
+            self.problems.setText("\n".join(problems))
+            return
+
+        if core.inside_game(self.manifest, plan["folder"]) and core.existing_files(plan):
+            answer = QtWidgets.QMessageBox.warning(
+                self, TITLE, "This writes over the game's own files. Write over them anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+
+        self.accept()
+
 
 
 def _choose(text, details, labels):
