@@ -338,8 +338,11 @@ def _lay_textures(manifest):
                     value = float(channel["default"])
                     starts.append((channel_type, substance_painter.colormanagement.Color(value, value, value)))
 
-            _fill(stack, "Starting values", starts)
+            # Each goes below what the stack has, the layer a new project
+            # starts with to paint on above them, the starting values at the
+            # bottom.
             _fill(stack, "Game original", images)
+            _fill(stack, "Starting values", starts)
 
     lines = ["Opened {0} with {1} Texture Set(s).".format(manifest["entity"], len(manifest["textureSets"]))]
 
@@ -357,14 +360,21 @@ def _lay_textures(manifest):
 
 
 def _fill(stack, name, sources):
-    """Add a fill layer to a stack that fills channels from sources: images
-    or uniform colours, each a pair of channel and source."""
+    """Add a fill layer at the bottom of a stack that fills channels from
+    sources: images or uniform colours, each a pair of channel and source."""
     if not sources:
         return
 
     layerstack = substance_painter.layerstack
 
-    fill = layerstack.insert_fill(layerstack.InsertPosition.from_textureset_stack(stack))
+    # The root layers are listed from the top, so the last is the bottom one.
+    layers = layerstack.get_root_layer_nodes(stack)
+    if layers:
+        position = layerstack.InsertPosition.below_node(layers[-1])
+    else:
+        position = layerstack.InsertPosition.from_textureset_stack(stack)
+
+    fill = layerstack.insert_fill(position)
     fill.set_name(name)
     fill.active_channels = {channel_type for channel_type, _ in sources}
 
