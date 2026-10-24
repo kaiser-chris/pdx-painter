@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/kaiser-chris/pdx-painter/internal/locate"
@@ -47,9 +46,6 @@ type PlannedAsset struct {
 	Entity string `json:"entity"`
 }
 
-// formats are the formats a map may be written in.
-var formats = []string{"", "BC1", "BC3", "BC7", "BGRA8", "RGBA8", "PNG", "TGA"}
-
 // check refuses a plan that cannot be carried out, before anything is
 // written.
 func (p *Plan) check(manifest *Manifest) error {
@@ -80,7 +76,7 @@ func (p *Plan) check(manifest *Manifest) error {
 			return fmt.Errorf("Texture Set %s has no %s map", planned.Set, planned.Kind)
 		}
 
-		if !slices.Contains(formats, planned.Format) {
+		if planned.Format != "" && (!writable(planned.Format) || planned.Format == Legacy) {
 			return fmt.Errorf("%s of %s is to be written as %s, which is not a format this tool writes", planned.Kind, planned.Set, planned.Format)
 		}
 

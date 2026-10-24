@@ -35,7 +35,11 @@ import (
 
 // Version is the version of the manifest, which a plugin checks before it
 // reads one.
-const Version = 1
+const Version = 2
+
+// FirstVersion is the version of the first manifests, which named the DDS
+// formats otherwise and are read still.
+const FirstVersion = 1
 
 // Manifest is what preparing an entity wrote, and everything packing needs to
 // write the textures back.
@@ -170,12 +174,17 @@ type Map struct {
 	Width  int `json:"width"`
 	Height int `json:"height"`
 
-	// Format is how the file stores its pixels: one of the dds package's
-	// formats, or PNG or TGA. Levels is how many mipmap levels it has, and
-	// SRGB whether its DX10 header names an sRGB format.
+	// Format is how the file stores its pixels: a DDS format by the name DXGI
+	// gives it, such as BC3_UNORM, Legacy for a DDS file of a layout DXGI has
+	// no format for, or PNG or TGA. Levels is how many mipmap levels it has.
+	// See ddsfile.go.
 	Format string `json:"format"`
 	Levels int    `json:"levels"`
-	SRGB   bool   `json:"srgb"`
+
+	// SRGB is what the first manifests said apart from the format: whether
+	// it is sRGB. A manifest of now names the sRGB formats, such as
+	// BC7_UNORM_SRGB, and leaves it out.
+	SRGB bool `json:"srgb,omitempty"`
 
 	// New is set for a map that is not there yet, which packing makes: one a
 	// mesh names that is not next to it, or that it names none for. Path is
@@ -273,7 +282,7 @@ var blanks = map[string][4]uint8{
 
 // newFormat is what a new map is stored as: DXT5, which every one of the
 // games' maps reads, alpha and all.
-const newFormat = "BC3"
+const newFormat = "BC3_UNORM"
 
 func specOf(id string) (spec, bool) {
 	for _, s := range specs {

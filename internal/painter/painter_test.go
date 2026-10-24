@@ -1,6 +1,7 @@
 package painter
 
 import (
+	"bytes"
 	"image"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 	"github.com/kaiser-chris/pdx-asset-go/mesh/meshtest"
 	"github.com/kaiser-chris/pdx-asset-go/texture"
 
-	"github.com/kaiser-chris/pdx-painter/internal/dds"
+	"github.com/kaiser-chris/dds-go"
 	"github.com/kaiser-chris/pdx-painter/internal/locate"
 )
 
@@ -57,12 +58,12 @@ func pattern(size int, blue uint8) *image.NRGBA {
 func encoded(t *testing.T, img *image.NRGBA, format dds.Format) []byte {
 	t.Helper()
 
-	data, err := dds.Encode(img, format, 99, false)
-	if err != nil {
+	var out bytes.Buffer
+	if err := dds.Encode(&out, img, &dds.EncodeOptions{Format: format, MipLevels: dds.AllMipLevels}); err != nil {
 		t.Fatal(err)
 	}
 
-	return data
+	return out.Bytes()
 }
 
 // statueGame writes a game folder with one statue whose maps are stored the
@@ -74,9 +75,9 @@ func statueGame(t *testing.T) string {
 	files := map[string][]byte{
 		"gfx/models/statue/statue.asset":          []byte(statueAsset),
 		"gfx/models/statue/statue.mesh":           meshtest.QuadFile(2, 2),
-		"gfx/models/statue/statue_diffuse.dds":    encoded(t, pattern(16, 30), dds.BC3),
-		"gfx/models/statue/statue_normal.dds":     encoded(t, pattern(16, 0), dds.BGRA8),
-		"gfx/models/statue/statue_properties.dds": encoded(t, pattern(8, 200), dds.BC7),
+		"gfx/models/statue/statue_diffuse.dds":    encoded(t, pattern(16, 30), dds.BC3Unorm),
+		"gfx/models/statue/statue_normal.dds":     encoded(t, pattern(16, 0), dds.B8G8R8A8Unorm),
+		"gfx/models/statue/statue_properties.dds": encoded(t, pattern(8, 200), dds.BC7Unorm),
 	}
 
 	for name, content := range files {
@@ -160,7 +161,7 @@ func TestPrepareAnEntity(t *testing.T) {
 		t.Errorf("set %s of %dx%d, want statue of 16x16, the largest map", set.Name, set.Width, set.Height)
 	}
 
-	if stored := set.Maps[Properties]; stored.Format != "BC7" || stored.Levels != 4 || stored.Width != 8 {
+	if stored := set.Maps[Properties]; stored.Format != "BC7_UNORM" || stored.Levels != 4 || stored.Width != 8 {
 		t.Errorf("properties = %+v", stored)
 	}
 
@@ -262,7 +263,7 @@ func TestPackWritesWhatChanged(t *testing.T) {
 		t.Fatalf("packed = %+v, want the diffuse and properties written and the specular noted", packed)
 	}
 
-	diffuse := readBack(t, filepath.Join(out, "statue_diffuse.dds"), dds.BC3, 16, 5)
+	diffuse := readBack(t, filepath.Join(out, "statue_diffuse.dds"), dds.BC3Unorm, 16, 5)
 	if c, _ := diffuse.Colour(0, 0); c[0] < 250 || c[1] > 5 || c[3] != 255 {
 		t.Errorf("diffuse at the left = %v, want red with its alpha kept", c)
 	}
@@ -273,7 +274,7 @@ func TestPackWritesWhatChanged(t *testing.T) {
 
 	// Brought from 16 pixels back to the 8 of the map, and its other
 	// channels as they were: the blue of 200 is the metalness.
-	properties := readBack(t, filepath.Join(out, "statue_properties.dds"), dds.BC7, 8, 4)
+	properties := readBack(t, filepath.Join(out, "statue_properties.dds"), dds.BC7Unorm, 8, 4)
 	if c, _ := properties.Colour(3, 3); c[3] < 254 || c[2] < 198 || c[2] > 202 {
 		t.Errorf("properties = %v, want roughness white and metalness kept", c)
 	}
@@ -333,7 +334,7 @@ func TestPackKeepsWhatTheMeshDoesNotCover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	diffuse := readBack(t, filepath.Join(out, "statue_diffuse.dds"), dds.BC3, 16, 5)
+	diffuse := readBack(t, filepath.Join(out, "statue_diffuse.dds"), dds.BC3Unorm, 16, 5)
 
 	if c, _ := diffuse.Colour(2, 8); c[0] < 250 || c[1] > 5 {
 		t.Errorf("left = %v, want red", c)
@@ -406,13 +407,13 @@ func readBack(t *testing.T, path string, format dds.Format, size, levels int) *t
 		t.Fatal(err)
 	}
 
-	header, err := dds.ReadHeader(data)
+	header, err := dds.Parse(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if header.Format != format || header.Width != size || header.Levels != levels {
-		t.Errorf("%s: header = %+v, want %s of %d with %d levels", filepath.Base(path), header, format, size, levels)
+	if header.Format != format || header.Width != size || header.MipLevels != levels {
+		t.Errorf("%s: %v of %d with %d levels, want %v of %d with %d", filepath.Base(path), header.Format, header.Width, header.MipLevels, format, size, levels)
 	}
 
 	img, err := texture.DecodeDDS(data)
@@ -450,7 +451,7 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(folder, "quad_diffuse.dds"), encoded(t, pattern(16, 0), dds.BC3), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(folder, "quad_diffuse.dds"), encoded(t, pattern(16, 0), dds.BC3Unorm), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -469,7 +470,7 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 	}
 
 	for kind, name := range map[string]string{Diffuse: "statue_diffuse.dds", Normal: "statue_normal.dds", Properties: "statue_properties.dds"} {
-		if stored := set.Maps[kind]; !stored.New || stored.Path != filepath.Join(folder, name) || stored.Format != "BC3" {
+		if stored := set.Maps[kind]; !stored.New || stored.Path != filepath.Join(folder, name) || stored.Format != "BC3_UNORM" {
 			t.Errorf("%s = %+v, want a new %s", kind, stored, name)
 		}
 	}
@@ -506,19 +507,19 @@ func TestPrepareAndPackAMeshOfItsOwn(t *testing.T) {
 		t.Fatalf("packed = %+v, want the three new maps written", packed)
 	}
 
-	diffuse := readBack(t, filepath.Join(folder, "statue_diffuse.dds"), dds.BC3, 32, 6)
+	diffuse := readBack(t, filepath.Join(folder, "statue_diffuse.dds"), dds.BC3Unorm, 32, 6)
 	if c, _ := diffuse.Colour(5, 5); c[0] < 195 || c[0] > 205 || c[3] != 255 {
 		t.Errorf("diffuse = %v", c)
 	}
 
-	normal := readBack(t, filepath.Join(folder, "statue_normal.dds"), dds.BC3, 32, 6)
+	normal := readBack(t, filepath.Join(folder, "statue_normal.dds"), dds.BC3Unorm, 32, 6)
 	if c, _ := normal.Colour(5, 5); c[1] < 124 || c[1] > 132 || c[3] < 124 || c[3] > 132 {
 		t.Errorf("normal = %v, want flat", c)
 	}
 
 	// The specular strength was not exported, and keeps what a new map
 	// starts at.
-	properties := readBack(t, filepath.Join(folder, "statue_properties.dds"), dds.BC3, 32, 6)
+	properties := readBack(t, filepath.Join(folder, "statue_properties.dds"), dds.BC3Unorm, 32, 6)
 	if c, _ := properties.Colour(5, 5); c[3] < 60 || c[3] > 68 || c[1] < 124 || c[1] > 132 {
 		t.Errorf("properties = %v", c)
 	}
@@ -634,7 +635,7 @@ func TestPackAPlanAsANewEntity(t *testing.T) {
 	plan := &Plan{
 		Folder: folder,
 		Maps: []PlannedMap{
-			{Set: "statue", Kind: Diffuse, File: "monument_diffuse.dds", Format: "BC7"},
+			{Set: "statue", Kind: Diffuse, File: "monument_diffuse.dds", Format: "BC7_UNORM"},
 			{Set: "statue", Kind: Properties, File: "monument_properties.dds"},
 		},
 		Mesh:  &PlannedMesh{File: "monument.mesh"},
@@ -652,8 +653,8 @@ func TestPackAPlanAsANewEntity(t *testing.T) {
 		t.Errorf("written %v, want two maps, the mesh and the asset", packed.Written)
 	}
 
-	readBack(t, filepath.Join(folder, "monument_diffuse.dds"), dds.BC7, 16, 5)
-	readBack(t, filepath.Join(folder, "monument_properties.dds"), dds.BC7, 8, 4)
+	readBack(t, filepath.Join(folder, "monument_diffuse.dds"), dds.BC7Unorm, 16, 5)
+	readBack(t, filepath.Join(folder, "monument_properties.dds"), dds.BC7Unorm, 8, 4)
 
 	original, _ := os.ReadFile(manifest.MeshFile.Path)
 	if copied, _ := os.ReadFile(filepath.Join(folder, "monument.mesh")); string(copied) != string(original) {
@@ -708,7 +709,7 @@ func TestPlanIsChecked(t *testing.T) {
 		"no folder":       {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds"}}},
 		"no set":          {Maps: []PlannedMap{{Set: "nothing", Kind: Diffuse, File: "a.dds"}}},
 		"a path":          {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "sub/a.dds"}}},
-		"wrong extension": {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.png", Format: "BC7"}}},
+		"wrong extension": {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.png", Format: "BC7_UNORM"}}},
 		"no format":       {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds", Format: "ATI2"}}},
 		"one file twice":  {Maps: []PlannedMap{{Set: "statue", Kind: Diffuse, File: "a.dds"}, {Set: "statue", Kind: Normal, File: "A.dds"}}},
 		"no entity name":  {Asset: &PlannedAsset{File: "a.asset", Mesh: "a_mesh"}},

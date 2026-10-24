@@ -35,7 +35,7 @@ or newer.
   after the names inside the mesh. A mesh with several shapes gets a Texture
   Set for each, the ones after the first numbered (`house_2_diffuse.dds`).
   Textures of these names next to the mesh are opened. Missing ones are
-  created on export, as DXT5.
+  created on export, as DXT5 with full mipmaps.
 
 Every Texture Set gets a fill layer holding the game's maps. Paint on layers
 above it.
@@ -65,6 +65,22 @@ for a mesh, and unticked with the original names for an entity.
 Only the texels the model's UVs cover are taken from Painter, because the
 games share textures between models. The rest of each map stays as it was.
 
+### Formats
+
+DDS files are read and written with
+[dds-go](https://github.com/kaiser-chris/dds-go), so any DDS format opens:
+every BC compression, uncompressed layouts of any channel order, floats, and
+legacy masked files. A map is written back as it was read: in the same format,
+with as many mipmaps, and under the same header byte for byte, including the
+exporter's flags and tags. Only the texels change. A map whose format you
+change in **Advanced Export...** gets a header for its new format, DX10 where
+the format needs one or the original had one.
+
+Mipmaps are averaged channel by channel, alpha too. The games keep data in
+alpha, such as a normal's y or the roughness, and weighting colour by it
+would change the data. sRGB formats are averaged in linear light.
+`pdx-painter formats` lists every format a map can be written in.
+
 ### Channels
 
 | Map | Channel | Painter |
@@ -84,6 +100,7 @@ go install github.com/kaiser-chris/pdx-painter/cmd/pdx-painter@latest
 
 ```sh
 pdx-painter list file.asset
+pdx-painter formats
 pdx-painter prepare -asset file.asset -entity some_entity -out work
 pdx-painter prepare -mesh file.mesh -out work
 pdx-painter pack -manifest work/manifest.json -exported exported (-in-place | -out folder | -plan plan.json)
@@ -116,9 +133,10 @@ version and publishes the release.
 
 ## Not done yet
 
-- The mesh is read, never written, and no `.asset` file is made for a mesh.
-- The BC7 encoder writes mode 6 only. That is fine for painting, but a
-  dedicated compressor does better.
+- The mesh is read, never written, though Advanced Export copies it and writes
+  an `.asset` for it.
+- Painter's channels are exported in eight bits, so a map of 16 bits or floats
+  comes back with the precision of eight.
 
 ## License
 

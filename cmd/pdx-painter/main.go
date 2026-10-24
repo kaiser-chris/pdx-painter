@@ -4,6 +4,7 @@
 // it can be run on its own too.
 //
 //	pdx-painter list <file.asset>
+//	pdx-painter formats
 //	pdx-painter prepare -asset <file.asset> -entity <name> -out <folder> [-game <folder>] [-attachments] [-flip-green]
 //	pdx-painter prepare -mesh <file.mesh> -out <folder> [-flip-green]
 //	pdx-painter pack -manifest <manifest.json> -exported <folder> (-out <folder> | -in-place | -plan <plan.json>) [-no-backup] [-dry-run]
@@ -42,7 +43,7 @@ func main() {
 	}
 }
 
-const usage = "usage: pdx-painter list|prepare|pack|version, see -h of each"
+const usage = "usage: pdx-painter list|prepare|pack|formats|version, see -h of each"
 
 func run(args []string) (any, error) {
 	if len(args) == 0 {
@@ -50,6 +51,8 @@ func run(args []string) (any, error) {
 	}
 
 	switch args[0] {
+	case "formats":
+		return map[string]any{"formats": painter.WritableFormats()}, nil
 	case "version":
 		return map[string]any{"version": version, "manifest": painter.Version}, nil
 	case "list":

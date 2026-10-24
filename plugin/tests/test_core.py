@@ -258,5 +258,30 @@ class TestAdvancedExport(unittest.TestCase):
         self.assertEqual([entry["rootPath"] for entry in config["exportList"]], ["decal"])
 
 
+class TestFormats(unittest.TestCase):
+    def test_keep_names_the_format_read(self):
+        self.assertEqual(core.keep_label({"format": "BC3_UNORM"}), "Keep (DXT5 (BC3))")
+        self.assertEqual(core.keep_label({"format": "BC7_UNORM_SRGB"}), "Keep (BC7 sRGB)")
+        self.assertEqual(core.keep_label({"format": "Legacy"}), "Keep (legacy layout)")
+        self.assertEqual(core.keep_label({"format": "R8G8_UNORM"}), "Keep (R8G8_UNORM)")
+
+        # As a project opened by the first version names them.
+        self.assertEqual(core.keep_label({"format": "BC3"}), "Keep (DXT5 (BC3))")
+
+    def test_the_first_manifests_are_read(self):
+        core.check_manifest({"version": 1})
+        core.check_manifest({"version": 2})
+
+
+@unittest.skipUnless(os.path.isfile(TOOL), "pdx-painter is not built")
+class TestFormatsOfTheTool(unittest.TestCase):
+    def test_every_format_offered_is_one_the_tool_writes(self):
+        writable = set(core.run_tool(["formats"], TOOL)["formats"])
+
+        for value, label in core.FORMATS:
+            if value:
+                self.assertIn(value, writable, label)
+
+
 if __name__ == "__main__":
     unittest.main()

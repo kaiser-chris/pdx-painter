@@ -69,7 +69,11 @@ type target struct {
 // Two Texture Sets drawn with one map both lay their channels into it, the
 // later over the earlier.
 func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
-	if manifest.Version != Version {
+	switch manifest.Version {
+	case Version:
+	case FirstVersion:
+		manifest.upgrade()
+	default:
 		return nil, fmt.Errorf("the manifest is of version %d, this tool reads %d", manifest.Version, Version)
 	}
 
@@ -241,6 +245,19 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 	slices.Sort(packed.Unchanged)
 
 	return packed, nil
+}
+
+// upgrade reads a manifest of the first version as one of now: its maps'
+// formats named the way DXGI names them.
+func (m *Manifest) upgrade() {
+	for index := range m.TextureSets {
+		for kind, stored := range m.TextureSets[index].Maps {
+			stored.Format, stored.SRGB = currentFormat(stored.Format, stored.SRGB), false
+			m.TextureSets[index].Maps[kind] = stored
+		}
+	}
+
+	m.Version = Version
 }
 
 // where says where a map of a Texture Set is written, and in which format,

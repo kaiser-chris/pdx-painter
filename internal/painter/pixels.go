@@ -13,14 +13,24 @@ import (
 
 	"github.com/kaiser-chris/pdx-asset-go/texture"
 
-	"github.com/kaiser-chris/pdx-painter/internal/dds"
+	"github.com/kaiser-chris/dds-go"
 )
 
 // readPixels reads a texture file as plain pixels, whatever it is stored as.
+//
+// A DDS file is read by dds-go, in any format it has. One dds-go refuses, such
+// as one holding fewer mipmap levels than it claims, is read the way the
+// games' loader in pdx-asset-go reads it.
 func readPixels(path string) (*image.NRGBA, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+
+	if strings.EqualFold(filepath.Ext(path), ".dds") {
+		if img, err := readDDSPixels(data); err == nil {
+			return img, nil
+		}
 	}
 
 	decoded, err := texture.Decode(path, data)
@@ -63,12 +73,16 @@ func storage(path string) (Map, error) {
 			return Map{}, err
 		}
 
-		header, err := dds.ReadHeader(data)
+		file, err := dds.Parse(data)
 		if err != nil {
 			return Map{}, fmt.Errorf("%s: %w", path, err)
 		}
 
-		return Map{Format: string(header.Format), Levels: header.Levels, SRGB: header.SRGB}, nil
+		if file.Format != dds.FormatUnknown && !writable(file.Format.String()) {
+			return Map{}, fmt.Errorf("%s is stored as %v, which can be read but not written back", path, file.Format)
+		}
+
+		return Map{Format: formatOf(file), Levels: file.MipLevels}, nil
 	case ".png":
 		return Map{Format: "PNG", Levels: 1}, nil
 	case ".tga":
@@ -90,7 +104,7 @@ func encode(img *image.NRGBA, stored Map) ([]byte, error) {
 		return encodeTGA(img), nil
 	}
 
-	return dds.Encode(img, dds.Format(stored.Format), stored.Levels, stored.SRGB)
+	return encodeDDS(img, stored)
 }
 
 // encodeTGA writes an uncompressed Targa of 32 bits a pixel, its first row at
@@ -119,7 +133,7 @@ func encodeTGA(img *image.NRGBA) []byte {
 // more, then sampled between its pixels the rest of the way.
 func resize(img *image.NRGBA, width, height int) *image.NRGBA {
 	for img.Rect.Dx() >= width*2 && img.Rect.Dy() >= height*2 {
-		img = dds.Halve(img)
+		img = Halve(img)
 	}
 
 	if img.Rect.Dx() == width && img.Rect.Dy() == height {

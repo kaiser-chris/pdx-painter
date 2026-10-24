@@ -15,7 +15,11 @@ import sys
 VERSION = "dev"
 
 # The manifest version pdx-painter writes, which the plugin reads.
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+
+# The versions of manifest the plugin reads: its own, and the first, which
+# pdx-painter reads still, its formats named otherwise.
+MANIFEST_VERSIONS = (1, 2)
 
 # What the plugin calls itself in a project's metadata.
 METADATA_CONTEXT = "pdx_painter"
@@ -239,7 +243,7 @@ def for_metadata(value):
 def check_manifest(manifest):
     """Raise ToolError for a manifest of a version the plugin does not read."""
     version = manifest.get("version")
-    if version != MANIFEST_VERSION:
+    if version not in MANIFEST_VERSIONS:
         raise ToolError("the manifest is of version {0}, the plugin reads {1}; install matching versions".format(version, MANIFEST_VERSION))
 
 
@@ -251,10 +255,38 @@ MAP_KINDS = [("diffuse", "Diffuse"), ("normal", "Normal"), ("properties", "Prope
 
 # The formats a map can be written in, by the names pdx-painter takes, with
 # what the dialog calls them. The empty one keeps the format it was read in.
-FORMATS = [("", "Keep"), ("BC1", "DXT1"), ("BC3", "DXT5"), ("BC7", "BC7"), ("BGRA8", "Uncompressed")]
+FORMATS = [
+    ("", "Keep"),
+    ("BC1_UNORM", "DXT1 (BC1)"),
+    ("BC2_UNORM", "DXT3 (BC2)"),
+    ("BC3_UNORM", "DXT5 (BC3)"),
+    ("BC4_UNORM", "BC4, one channel"),
+    ("BC5_UNORM", "BC5, two channels"),
+    ("BC7_UNORM", "BC7"),
+    ("BC7_UNORM_SRGB", "BC7 sRGB"),
+    ("B8G8R8A8_UNORM", "Uncompressed"),
+]
 
-FORMAT_NAMES = {"BC1": "DXT1", "BC3": "DXT5", "BC7": "BC7", "BGRA8": "Uncompressed", "RGBA8": "Uncompressed",
-                "PNG": "PNG", "TGA": "TGA"}
+# What the dialog calls the formats a map may have been read in, by the names
+# DXGI gives them; any other is called by its own.
+FORMAT_NAMES = dict(FORMATS[1:])
+FORMAT_NAMES.update({
+    "BC1_UNORM_SRGB": "DXT1 sRGB",
+    "BC2_UNORM_SRGB": "DXT3 sRGB",
+    "BC3_UNORM_SRGB": "DXT5 sRGB",
+    "B8G8R8A8_UNORM_SRGB": "Uncompressed sRGB",
+    "R8G8B8A8_UNORM": "Uncompressed",
+    "R8G8B8A8_UNORM_SRGB": "Uncompressed sRGB",
+    "Legacy": "legacy layout",
+    "PNG": "PNG",
+    "TGA": "TGA",
+    # As the first manifests named them.
+    "BC1": "DXT1 (BC1)",
+    "BC3": "DXT5 (BC3)",
+    "BC7": "BC7",
+    "BGRA8": "Uncompressed",
+    "RGBA8": "Uncompressed",
+})
 
 
 def keep_label(stored):
