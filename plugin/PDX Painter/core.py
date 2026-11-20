@@ -290,8 +290,11 @@ FORMAT_NAMES.update({
 
 
 def keep_label(stored):
-    """What the dialog calls keeping a map's format: Keep (DXT5)."""
-    return "Keep ({0})".format(FORMAT_NAMES.get(stored.get("format", ""), stored.get("format", "")))
+    """What the dialog calls keeping a map's format: Keep (DXT5), or for a
+    map that is not there yet, the format it is made in: Default (DXT5)."""
+    name = FORMAT_NAMES.get(stored.get("format", ""), stored.get("format", ""))
+
+    return "{0} ({1})".format("Default" if stored.get("new") else "Keep", name)
 
 
 def stem(path):
@@ -316,9 +319,9 @@ def default_folder(manifest):
 
 def derives_by_default(manifest):
     """Whether an advanced export starts deriving every name from one: for a
-    mesh, whose names are derived already, but not for an entity, whose names
-    are kept as they are."""
-    return manifest["kind"] == "mesh"
+    mesh or a project of the user's own, whose names are derived already,
+    but not for an entity, whose names are kept as they are."""
+    return manifest["kind"] in ("mesh", FOREIGN)
 
 
 def map_extension(stored, chosen=""):
@@ -354,7 +357,11 @@ def derived_names(manifest, name, chosen=None):
 
 def existing_names(manifest):
     """The file names of what was opened, which an advanced export of an entity
-    starts with: the asset's, the mesh's and each map's own."""
+    starts with: the asset's, the mesh's and each map's own. A project of the
+    user's own has no files yet: its names are the ones derived from it."""
+    if is_foreign(manifest):
+        return derived_names(manifest, default_name(manifest))
+
     if manifest["kind"] == "mesh":
         names = derived_names(manifest, default_name(manifest))
     else:
@@ -381,23 +388,32 @@ def asset_definitions(asset_file):
 
 
 def can_write_mesh(manifest):
-    """Whether the mesh can be copied, and an asset written: only where the
-    mesh file is known."""
-    return bool(manifest.get("meshFile"))
+    """Whether the mesh can be written: copied, where the mesh file is known,
+    or made from Painter's mesh, for a project of the user's own."""
+    return manifest["kind"] == FOREIGN or bool(manifest.get("meshFile"))
 
 
 def can_write_asset(manifest):
-    """Whether an asset can be written: one needs the mesh file, and a mesh of
-    it to give mesh settings."""
+    """Whether an asset can be written: one needs a mesh, and meshes of it to
+    give mesh settings."""
     return can_write_mesh(manifest) and any(texture_set.get("meshes") for texture_set in manifest["textureSets"])
 
 
-def build_plan(folder, asset=None, mesh=None, maps=()):
+def is_foreign(manifest):
+    """Whether a manifest is of a project of the user's own, which the plugin
+    did not open."""
+    return manifest["kind"] == FOREIGN
+
+
+def build_plan(folder, asset=None, mesh=None, maps=(), obj=None, scale=1.0, asset_mesh=None):
     """The plan pdx-painter's pack carries out, from what the dialog chose.
 
     asset and mesh are the file names to write them as, or None; maps are
     (set, kind, file, format, extension) for each map chosen, the extension
-    being what its file is to end in, which pack does not read.
+    being what its file is to end in, which pack does not read. obj is the OBJ
+    the mesh is made of, scaled by scale, for a project of the user's own, and
+    asset_mesh the mesh the asset names where no mesh is written, which the
+    user makes.
     """
     plan = {"folder": folder, "maps": []}
 
@@ -410,10 +426,14 @@ def build_plan(folder, asset=None, mesh=None, maps=()):
 
     if mesh:
         plan["mesh"] = {"file": mesh}
+        if obj:
+            plan["mesh"].update(obj=obj, scale=scale)
 
     if asset:
         mesh_name, entity_name = asset_definitions(asset)
         plan["asset"] = {"file": asset, "mesh": mesh_name, "entity": entity_name}
+        if not mesh and asset_mesh is not None:
+            plan["asset"]["meshFile"] = asset_mesh
 
     return plan
 
@@ -450,6 +470,11 @@ def plan_problems(plan):
     if "asset" in plan:
         check("asset", plan["asset"]["file"], ".asset")
 
+        # The mesh the asset names, which the user makes, is not written.
+        named = plan["asset"].get("meshFile")
+        if named is not None and not named.strip().lower().endswith(".mesh"):
+            problems.append("Name the mesh the asset is to draw in the Mesh row: a file ending in .mesh.")
+
     for file in sorted(set(name for name in files if files.count(name) > 1)):
         problems.append("{0} is chosen for two files.".format(file))
 
@@ -477,3 +502,71 @@ def inside_game(manifest, folder):
         return os.path.commonpath([root, folder]) == root
     except ValueError:  # on different drives
         return False
+
+
+# --- Projects of the user's own -------------------------------------------------
+
+# The Kind of the manifest of a project the plugin did not open.
+FOREIGN = "foreign"
+
+# The channels of a project of the user's own that a channel of the games is
+# exported from, in the order they are tried: a channel of the plugin's own,
+# by its type and label, or a standard one by its type alone.
+SOURCES = {
+    "basecolor": [("BaseColor", None, "basecolor")],
+    "diffusealpha": [("User0", "Diffuse alpha", "user0"), ("Opacity", None, "opacity")],
+    "normal": [("Normal", None, "Normal_DirectX")],
+    "subsurface": [("User1", "Subsurface", "user1")],
+    "specular": [("User2", "Specular strength", "user2")],
+    "metallic": [("Metallic", None, "metallic")],
+    "roughness": [("Roughness", None, "roughness")],
+}
+
+# The channels of the plugin's own a project of the user's own can be given,
+# with their labels and what they start at.
+PDX_CHANNELS = [("User0", "Diffuse alpha", 1.0), ("User1", "Subsurface", 0.0), ("User2", "Specular strength", 0.5)]
+
+
+def foreign_channels(manifest, available):
+    """The manifest of a project of the user's own, its channels exported from
+    what the project has: available is, by Texture Set name, the channels its
+    stack has, by type name, with their labels.
+
+    A channel of the games the project has no source for is left out, and
+    keeps the value a new map starts at; the diffuse alpha is taken from
+    Opacity where the plugin's own channel is not there.
+    """
+    for texture_set in manifest["textureSets"]:
+        present = available.get(texture_set["name"], {})
+        channels = []
+
+        for channel in texture_set["channels"]:
+            for type_name, label, export_name in SOURCES.get(channel["id"], []):
+                if type_name not in present or (label is not None and present[type_name] != label):
+                    continue
+
+                export_type = "virtualMap" if export_name.startswith("Normal_") else "documentMap"
+                channels.append(dict(channel, painter=type_name, exportName=export_name, exportType=export_type))
+
+                break
+
+        texture_set["channels"] = channels
+
+    return manifest
+
+
+def missing_pdx_channels(available):
+    """The channels of the plugin's own a project of the user's own could be
+    given, by Texture Set name, as (type, label, start) each, and the ones it
+    cannot be given, since the project uses their slot for something else, as
+    (set, type, label it has)."""
+    missing, taken = {}, []
+
+    for set_name, present in available.items():
+        for type_name, label, start in PDX_CHANNELS:
+            if type_name not in present:
+                missing.setdefault(set_name, []).append((type_name, label, start))
+            elif present[type_name] != label:
+                taken.append((set_name, type_name, present[type_name]))
+
+    return missing, taken

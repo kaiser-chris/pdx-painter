@@ -268,6 +268,9 @@ class TestFormats(unittest.TestCase):
         # As a project opened by the first version names them.
         self.assertEqual(core.keep_label({"format": "BC3"}), "Keep (DXT5 (BC3))")
 
+        # A map that is not there yet is made in its format.
+        self.assertEqual(core.keep_label({"format": "BC3_UNORM", "new": True}), "Default (DXT5 (BC3))")
+
     def test_the_first_manifests_are_read(self):
         core.check_manifest({"version": 1})
         core.check_manifest({"version": 2})
@@ -281,6 +284,81 @@ class TestFormatsOfTheTool(unittest.TestCase):
         for value, label in core.FORMATS:
             if value:
                 self.assertIn(value, writable, label)
+
+
+def foreign(sets=("wall", "roof")):
+    """The manifest pdx-painter prepares of a project of the user's own."""
+    with tempfile.TemporaryDirectory() as folder:
+        args = ["prepare", "-foreign", "house", "-out", folder]
+        for name in sets:
+            args += ["-set", name]
+
+        return core.run_tool(args, TOOL)
+
+
+@unittest.skipUnless(os.path.isfile(TOOL), "pdx-painter is not built")
+class TestForeignProjects(unittest.TestCase):
+    def test_a_foreign_project_starts_deriving_and_can_write_a_mesh(self):
+        manifest = foreign()
+        self.assertTrue(core.is_foreign(manifest))
+        self.assertTrue(core.derives_by_default(manifest))
+        self.assertTrue(core.can_write_mesh(manifest))
+        self.assertTrue(core.can_write_asset(manifest))
+        self.assertEqual(core.default_name(manifest), "house")
+
+        names = core.existing_names(manifest)
+        self.assertEqual(names["asset"], "house.asset")
+        self.assertEqual(names["mesh"], "house.mesh")
+        self.assertEqual(names["maps"][("roof", "normal")], "house_2_normal.dds")
+
+    def test_channels_come_from_what_the_project_has(self):
+        available = {
+            "wall": {"BaseColor": "", "Normal": "", "Metallic": "", "Roughness": "", "Opacity": ""},
+            "roof": {"BaseColor": "", "Normal": "", "User0": "Diffuse alpha", "User1": "Height mask", "Opacity": ""},
+        }
+
+        manifest = core.foreign_channels(foreign(), available)
+        wall, roof = manifest["textureSets"]
+
+        sources = {channel["id"]: (channel["painter"], channel["exportName"]) for channel in wall["channels"]}
+        self.assertEqual(sources["diffusealpha"], ("Opacity", "opacity"))
+        self.assertEqual(sources["normal"], ("Normal", "Normal_DirectX"))
+        self.assertNotIn("subsurface", sources)
+
+        sources = {channel["id"]: channel["painter"] for channel in roof["channels"]}
+        self.assertEqual(sources["diffusealpha"], "User0")
+
+        # A user channel labelled otherwise is the project's own, not ours.
+        self.assertNotIn("subsurface", sources)
+        self.assertNotIn("metallic", sources)
+
+        # Painter takes it as JSON.
+        json.dumps(core.export_config(manifest, "C:/out"))
+
+    def test_the_channels_of_the_plugin_a_project_lacks(self):
+        missing, taken = core.missing_pdx_channels({
+            "wall": {"User0": "Diffuse alpha"},
+            "roof": {"User1": "Height mask"},
+        })
+
+        self.assertEqual([type_name for type_name, _, _ in missing["wall"]], ["User1", "User2"])
+        self.assertEqual([type_name for type_name, _, _ in missing["roof"]], ["User0", "User2"])
+        self.assertEqual(taken, [("roof", "User1", "Height mask")])
+
+
+class TestForeignPlans(unittest.TestCase):
+    def test_a_mesh_made_of_an_obj(self):
+        plan = core.build_plan("D:/out", asset="house.asset", mesh="house.mesh", obj="C:/work/painter.obj", scale=0.01)
+        self.assertEqual(plan["mesh"], {"file": "house.mesh", "obj": "C:/work/painter.obj", "scale": 0.01})
+        self.assertNotIn("meshFile", plan["asset"])
+
+    def test_an_asset_of_a_mesh_of_the_users(self):
+        plan = core.build_plan("D:/out", asset="house.asset", asset_mesh="my_house.mesh")
+        self.assertEqual(plan["asset"]["meshFile"], "my_house.mesh")
+        self.assertEqual(core.plan_problems(plan), [])
+
+        plan = core.build_plan("D:/out", asset="house.asset", asset_mesh="")
+        self.assertIn("Mesh row", " ".join(core.plan_problems(plan)))
 
 
 if __name__ == "__main__":

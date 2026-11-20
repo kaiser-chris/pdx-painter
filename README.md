@@ -65,6 +65,31 @@ for a mesh, and unticked with the original names for an entity.
 Only the texels the model's UVs cover are taken from Painter, because the
 games share textures between models. The rest of each map stays as it was.
 
+### Your own models
+
+A project you made in Painter yourself, from an FBX or OBJ of your own, can be
+exported to the games too: both export entries open **Advanced Export...** for
+it. Every Texture Set gets a diffuse, normal and properties map, packed from
+Base Color, Normal, Metallic and Roughness. Opacity goes into the diffuse
+alpha, unless the set has the plugin's own **Diffuse alpha** channel.
+
+Before the export, the plugin offers to add the channels the games' maps hold
+beyond Painter's standard ones: **Diffuse alpha**, **Subsurface** and
+**Specular strength**. They come with a layer holding their starting values,
+so you can paint them. Without them, those channels keep their starting
+values: opaque, no subsurface, half specular. A user channel your project
+uses for something else is left alone.
+
+The asset and the mesh are optional, and unticked to start with:
+
+- **Mesh** converts Painter's mesh into the games' `.mesh`: one shape per
+  Texture Set, named after it, static, with no skeleton or animation. It is
+  mirrored into the games' left-handed space, with tangents worked out the way
+  the games' exporters work them out. **Scale** multiplies its positions, for
+  a model in other units than the games'.
+- **Asset** writes an `.asset` drawing it. Without the mesh, the asset draws a
+  `.mesh` of the name in the Mesh row, which you make yourself.
+
 ### Formats
 
 DDS files are read and written with
@@ -103,6 +128,7 @@ pdx-painter list file.asset
 pdx-painter formats
 pdx-painter prepare -asset file.asset -entity some_entity -out work
 pdx-painter prepare -mesh file.mesh -out work
+pdx-painter prepare -foreign name -set "Texture Set" -out work
 pdx-painter pack -manifest work/manifest.json -exported exported (-in-place | -out folder | -plan plan.json)
 ```
 
@@ -133,8 +159,11 @@ version and publishes the release.
 
 ## Not done yet
 
-- The mesh is read, never written, though Advanced Export copies it and writes
-  an `.asset` for it.
+- A mesh of the games is copied, never changed: what Painter changes is only
+  the textures. A mesh made of your own model is static: no skeleton, no
+  animations, one level of detail.
+- The units Painter exports its mesh in have not been checked against the
+  games yet: set the scale if your model comes out too large or too small.
 - Painter's channels are exported in eight bits, so a map of 16 bits or floats
   comes back with the precision of eight.
 

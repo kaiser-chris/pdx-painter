@@ -299,7 +299,7 @@ def _lay_textures(manifest):
 
     substance_painter.project.Metadata(core.METADATA_CONTEXT).set("manifest", core.for_metadata(manifest))
 
-    sets = {texture_set.name(): texture_set for texture_set in textureset.all_texture_sets()}
+    sets = {_name_of(texture_set): texture_set for texture_set in textureset.all_texture_sets()}
     missing = []
 
     with layerstack.ScopedModification("Lay in the game's textures"):
@@ -413,6 +413,17 @@ def _opened_manifest():
 
 
 def export_textures():
+    project = substance_painter.project
+    if not project.is_open():
+        _error("No project is open.")
+        return
+
+    # A project of the user's own has no files to write back over: it is
+    # exported as something new, which is what Advanced Export does.
+    if not _metadata_value(project.Metadata(core.METADATA_CONTEXT), "manifest"):
+        advanced_export()
+        return
+
     opened = _opened_manifest()
     if opened is None:
         return
@@ -473,21 +484,165 @@ def _export_and_pack(manifest, where, only=None, plan=None):
 
 
 def advanced_export():
-    opened = _opened_manifest()
-    if opened is None:
+    project = substance_painter.project
+    if not project.is_open():
+        _error("No project is open.")
         return
 
-    manifest, metadata = opened
+    metadata = project.Metadata(core.METADATA_CONTEXT)
 
-    dialog = _AdvancedExport(manifest, _metadata_value(metadata, "advancedFolder") or core.default_folder(manifest))
+    if _metadata_value(metadata, "manifest"):
+        manifest, metadata = _opened_manifest()
+        folder = core.default_folder(manifest)
+    else:
+        manifest = _foreign_manifest()
+        if manifest is None:
+            return
+
+        folder = os.path.dirname(_saved_project()) or _setting("foreign_folder")
+
+    dialog = _AdvancedExport(manifest, _metadata_value(metadata, "advancedFolder") or folder)
     if dialog.exec() != QtWidgets.QDialog.Accepted:
         return
 
     plan = dialog.plan()
+
+    # A project of the user's own has its mesh made from the OBJ Painter
+    # exports of it, which only a mesh to write needs.
+    if core.is_foreign(manifest) and "mesh" in plan:
+        obj = _export_obj(manifest)
+        if obj is None:
+            return
+
+        plan = dialog.plan(obj=obj)
+
     metadata.set("advancedFolder", plan["folder"])
+    if core.is_foreign(manifest):
+        _set_setting("foreign_folder", plan["folder"])
 
     only = {planned["set"] for planned in plan["maps"]}
     _export_and_pack(manifest, [], only=only, plan=plan)
+
+
+# --- Projects of the user's own -------------------------------------------------
+
+# The channels of a stack a project of the user's own is exported from.
+_SOURCE_TYPES = ["BaseColor", "Normal", "Metallic", "Roughness", "Opacity", "User0", "User1", "User2"]
+
+
+def _available_channels():
+    """The channels each Texture Set's stack has, by type name, with the
+    labels of the user channels."""
+    textureset = substance_painter.textureset
+    available = {}
+
+    for texture_set in textureset.all_texture_sets():
+        stack = texture_set.get_stack()
+        present = {}
+
+        for type_name in _SOURCE_TYPES:
+            channel_type = getattr(textureset.ChannelType, type_name, None)
+            if channel_type is not None and stack.has_channel(channel_type):
+                label = stack.get_channel(channel_type).label() if type_name.startswith("User") else ""
+                present[type_name] = label or ""
+
+        available[_name_of(texture_set)] = present
+
+    return available
+
+
+def _foreign_manifest():
+    """The manifest of the open project, which the plugin did not open: its
+    Texture Sets, each a set of new maps, exported from the channels the
+    project has, after offering it the plugin's own. None if the user gave up."""
+    available = _available_channels()
+    if not available:
+        _error("The project has no Texture Set to export.")
+        return None
+
+    missing, taken = core.missing_pdx_channels(available)
+
+    if missing:
+        text = ("This project was not opened with PDX Painter. Its Base Color, Normal, Metallic, Roughness "
+                "and Opacity are exported into the games' maps.\n\n"
+                "The games' maps also hold a diffuse alpha, a subsurface mask and a specular strength. "
+                "Add channels for them, with a layer of their starting values, so they can be painted? "
+                "Otherwise they keep their starting values: opaque, no subsurface, half specular.")
+        if taken:
+            text += "\n\nThese channels are used for something else and are left alone:\n" + "\n".join(
+                "{0}: {1} \"{2}\"".format(set_name, type_name, label) for set_name, type_name, label in taken)
+
+        answer = QtWidgets.QMessageBox.question(
+            _window(), TITLE, text,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Yes)
+
+        if answer == QtWidgets.QMessageBox.Cancel:
+            return None
+
+        if answer == QtWidgets.QMessageBox.Yes:
+            _add_pdx_channels(missing)
+            available = _available_channels()
+
+    project = substance_painter.project
+    name = core.stem(_saved_project()) or core.stem(_imported_mesh()) or "model"
+    folder = _work_folder(_saved_project() or name, "foreign")
+    shutil.rmtree(folder, ignore_errors=True)
+
+    args = ["prepare", "-foreign", name, "-out", folder]
+    for set_name in available:
+        args += ["-set", set_name]
+
+    manifest = _run(args)
+    core.check_manifest(manifest)
+
+    return core.foreign_channels(manifest, available)
+
+
+def _add_pdx_channels(missing):
+    """Give Texture Sets the plugin's own channels, and a fill layer at the
+    bottom of each stack holding what they start at."""
+    textureset = substance_painter.textureset
+
+    with substance_painter.layerstack.ScopedModification("Add the PDX channels"):
+        for texture_set in textureset.all_texture_sets():
+            channels = missing.get(_name_of(texture_set))
+            if not channels:
+                continue
+
+            stack = texture_set.get_stack()
+            starts = []
+
+            for type_name, label, start in channels:
+                channel_type = getattr(textureset.ChannelType, type_name)
+                stack.add_channel(channel_type, textureset.ChannelFormat.L8, label)
+                starts.append((channel_type, substance_painter.colormanagement.Color(start, start, start)))
+
+            _fill(stack, "PDX starting values", starts)
+
+
+def _export_obj(manifest):
+    """Export the project's mesh as an OBJ, triangulated, into the folder the
+    project is prepared in, and return its path, or None if Painter failed."""
+    export = substance_painter.export
+
+    option = export.MeshExportOption.BaseMesh
+    if not export.scene_is_triangulated():
+        option = export.MeshExportOption.TriangulatedMesh
+
+    path = os.path.join(_work_folder(_saved_project() or manifest["entity"], "foreign"), "painter.obj")
+
+    _busy()
+    try:
+        result = export.export_mesh(path, option)
+    finally:
+        _idle()
+
+    if result.status != export.ExportStatus.Success or not os.path.isfile(path):
+        _error("Painter did not export the mesh: {0}".format(getattr(result, "message", result.status)))
+        return None
+
+    return path
 
 
 class _AdvancedExport(QtWidgets.QDialog):
@@ -540,6 +695,23 @@ class _AdvancedExport(QtWidgets.QDialog):
 
         line = self._row(grid, line, "mesh", "Mesh", enabled=mesh_known)
 
+        # A project of the user's own has its mesh made from Painter's, whose
+        # units the games may not share: it is scaled on the way.
+        self.scale = None
+        if core.is_foreign(manifest):
+            self.scale = QtWidgets.QDoubleSpinBox()
+            self.scale.setDecimals(4)
+            self.scale.setRange(0.0001, 10000.0)
+            self.scale.setValue(1.0)
+            self.scale.setPrefix("Scale ")
+            self.scale.setToolTip("What the positions of Painter's mesh are multiplied by in the games' mesh")
+            grid.addWidget(self.scale, line - 1, 3)
+
+            hint = QtWidgets.QLabel("Unticked, the asset draws a mesh of this name, which you make.")
+            hint.setStyleSheet("color: gray;")
+            grid.addWidget(hint, line, 2, 1, 2)
+            line += 1
+
         if not mesh_known:
             note = QtWidgets.QLabel("The mesh file of this entity is not known, so neither it nor an asset can be written.")
             note.setStyleSheet("color: gray;")
@@ -547,15 +719,38 @@ class _AdvancedExport(QtWidgets.QDialog):
             grid.addWidget(note, line, 1, 1, 3)
             line += 1
 
+        layout.addLayout(grid)
+        self.files = grid
+
+        # The maps of every Texture Set, which a model of many sets has many
+        # of, scroll below the files, in columns as wide as theirs.
+        sets = QtWidgets.QGridLayout()
+        line = 0
+
         for texture_set in manifest["textureSets"]:
-            line = self._heading(grid, line, "Texture Set " + texture_set["name"])
+            line = self._heading(sets, line, "Texture Set " + texture_set["name"])
 
             for kind, label in core.MAP_KINDS:
                 stored = texture_set["maps"].get(kind)
                 if stored:
-                    line = self._row(grid, line, (texture_set["name"], kind), label, checked=True, stored=stored)
+                    line = self._row(sets, line, (texture_set["name"], kind), label, checked=True, stored=stored)
 
-        layout.addLayout(grid)
+        for columns in (grid, sets):
+            columns.setColumnStretch(2, 1)
+            columns.setColumnMinimumWidth(0, 22)
+            columns.setColumnMinimumWidth(1, 80)
+            columns.setColumnMinimumWidth(3, 170)
+
+        inner = QtWidgets.QWidget()
+        inner.setLayout(sets)
+        sets.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidget(inner)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        layout.addWidget(self.scroll, 1)
 
         self.warning = QtWidgets.QLabel()
         self.warning.setWordWrap(True)
@@ -596,6 +791,27 @@ class _AdvancedExport(QtWidgets.QDialog):
                 row["format"].currentIndexChanged.connect(self._update)
 
         self._update()
+        self._fit(inner)
+
+    def _fit(self, inner):
+        """Size the dialog to show every map where the screen has room, and
+        to scroll them where it has not, at most most of the screen high."""
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        room = int(screen.availableGeometry().height() * 0.85) if screen is not None else 900
+
+        # Everything but the maps, and then the maps as far as they fit.
+        rest = self.sizeHint().height() - self.scroll.sizeHint().height()
+        maps = inner.sizeHint().height()
+
+        shown = min(maps, max(room - rest, 150))
+        self.scroll.setMinimumHeight(shown)
+
+        # Where the maps scroll, their scroll bar takes room beside them,
+        # which the files above leave too, so their columns stay in line.
+        if shown < maps:
+            self.files.setContentsMargins(0, 0, self.scroll.verticalScrollBar().sizeHint().width(), 0)
+
+        self.resize(max(650, self.sizeHint().width()), min(rest + maps, room))
 
     def _heading(self, grid, line, text):
         label = QtWidgets.QLabel(text)
@@ -670,8 +886,9 @@ class _AdvancedExport(QtWidgets.QDialog):
             field.setText(file)
             field.blockSignals(False)
 
-    def plan(self):
-        """The plan of what the dialog has chosen."""
+    def plan(self, obj=None):
+        """The plan of what the dialog has chosen. obj is the OBJ Painter
+        exported the mesh of a project of the user's own as."""
         maps = []
         for key, row in self.rows.items():
             if isinstance(key, tuple) and row["check"].isChecked():
@@ -683,7 +900,15 @@ class _AdvancedExport(QtWidgets.QDialog):
             row = self.rows[key]
             return row["file"].text().strip() if row["check"].isChecked() else None
 
-        return core.build_plan(self.folder.text().strip(), asset=chosen("asset"), mesh=chosen("mesh"), maps=maps)
+        # The asset of a project of the user's own, its mesh not written,
+        # draws the one the Mesh row names.
+        asset_mesh = None
+        if core.is_foreign(self.manifest):
+            asset_mesh = self.rows["mesh"]["file"].text().strip()
+
+        return core.build_plan(
+            self.folder.text().strip(), asset=chosen("asset"), mesh=chosen("mesh"), maps=maps,
+            obj=obj, scale=self.scale.value() if self.scale is not None else 1.0, asset_mesh=asset_mesh)
 
     def _export(self):
         plan = self.plan()
@@ -855,3 +1080,29 @@ def edit_settings():
     _set_setting("attachments", attachments.isChecked())
     _set_setting("flip_green", flip.isChecked())
     _set_setting("tool", tool.text().strip())
+
+
+def _name_of(texture_set):
+    """A Texture Set's name: a property in Painter 2026, which warns when it is
+    called as the method it was before, and a method before."""
+    name = texture_set.name
+    if isinstance(name, str):
+        return str(name)
+
+    return name()
+
+
+def _saved_project():
+    """The file the open project is saved as, or nothing for one not saved
+    yet, which Painter reports the template it was made from for."""
+    path = substance_painter.project.file_path() or ""
+
+    return path if path.lower().endswith(".spp") else ""
+
+
+def _imported_mesh():
+    """The mesh file the open project was made from, or nothing."""
+    try:
+        return substance_painter.project.last_imported_mesh_path() or ""
+    except Exception:  # pylint: disable=broad-except
+        return ""

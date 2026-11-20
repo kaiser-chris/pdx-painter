@@ -7,6 +7,7 @@
 //	pdx-painter formats
 //	pdx-painter prepare -asset <file.asset> -entity <name> -out <folder> [-game <folder>] [-attachments] [-flip-green]
 //	pdx-painter prepare -mesh <file.mesh> -out <folder> [-flip-green]
+//	pdx-painter prepare -foreign <name> -set <Texture Set> [-set ...] -out <folder>
 //	pdx-painter pack -manifest <manifest.json> -exported <folder> (-out <folder> | -in-place | -plan <plan.json>) [-no-backup] [-dry-run]
 //
 // Every command writes what it did as one JSON object to standard output, or
@@ -107,9 +108,22 @@ func prepare(args []string) (any, error) {
 	game := flags.String("game", "", "the game folder a mod is read with, such as .../Victoria 3/game")
 	attachments := flags.Bool("attachments", false, "take the entities attached to it as well")
 	flipGreen := flags.Bool("flip-green", false, "turn the y of the normal maps upside down")
+	foreign := flags.String("foreign", "", "the name of a Painter project the plugin did not open, in place of -asset and -entity")
+
+	var sets []string
+
+	flags.Func("set", "a Texture Set of the -foreign project; once for each", func(name string) error {
+		sets = append(sets, name)
+
+		return nil
+	})
 
 	if err := flags.Parse(args); err != nil {
 		return nil, err
+	}
+
+	if *foreign != "" && *out != "" {
+		return painter.PrepareForeign(*foreign, sets, *out)
 	}
 
 	if *meshFile != "" && *out != "" {
@@ -117,7 +131,7 @@ func prepare(args []string) (any, error) {
 	}
 
 	if *asset == "" || *entity == "" || *out == "" {
-		return nil, errors.New("prepare needs -asset, -entity and -out, or -mesh and -out")
+		return nil, errors.New("prepare needs -asset, -entity and -out, -mesh and -out, or -foreign, -set and -out")
 	}
 
 	location, err := locate.Locate(*asset)

@@ -91,11 +91,20 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 	var order []string
 
 	for _, set := range manifest.TextureSets {
+		// A set of nothing but new maps has no coverage, and needs none.
 		mask := readMask(set.Coverage)
-		if mask == nil {
+		if mask == nil && set.Coverage != "" {
 			packed.Notes = append(packed.Notes, fmt.Sprintf(
 				"the coverage of %s cannot be read; its whole export is laid into its maps, over what other models may share of them", set.Name))
 		}
+
+		// The size Painter exported the set at, which a new map of it takes.
+		size := image.Pt(set.Width, set.Height)
+		if size.X <= 0 || size.Y <= 0 {
+			size = image.Pt(newSize, newSize)
+		}
+
+		sized := false
 
 		for _, channel := range set.Channels {
 			s, ok := specOf(channel.ID)
@@ -115,7 +124,12 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 
 			exported := filepath.Join(options.Exported, set.Name+"_"+channel.ID+".png")
 			if _, err := os.Stat(exported); err != nil {
-				packed.Notes = append(packed.Notes, fmt.Sprintf("%s of %s was not exported; kept as it was", channel.ID, set.Name))
+				kept := "kept as it was"
+				if stored.New {
+					kept = "it starts as a new map's does"
+				}
+
+				packed.Notes = append(packed.Notes, fmt.Sprintf("%s of %s was not exported; %s", channel.ID, set.Name, kept))
 
 				continue
 			}
@@ -123,6 +137,10 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 			img, err := readPNG(exported)
 			if err != nil {
 				return nil, err
+			}
+
+			if !sized {
+				size, sized = img.Rect.Size(), true
 			}
 
 			into, ok := targets[stored.Path]
@@ -161,6 +179,29 @@ func Pack(manifest *Manifest, options PackOptions) (*Packed, error) {
 			layer := clone(into.pixels)
 			s.insert(layer, img, manifest.FlipGreen)
 			takeCovered(into.pixels, layer, mask)
+		}
+
+		// A new map is written whatever Painter exported of it, since what
+		// names it, the mesh settings of an asset, needs it there: one none of
+		// whose channels Painter has is its starting values, at the size of
+		// the set's other channels.
+		for _, kind := range []string{Diffuse, Normal, Properties} {
+			stored, ok := set.Maps[kind]
+			if !ok || !stored.New {
+				continue
+			}
+
+			if _, ok := targets[stored.Path]; ok {
+				continue
+			}
+
+			destination, format, wanted := options.where(set.Name, kind, stored)
+			if !wanted {
+				continue
+			}
+
+			targets[stored.Path] = &target{stored: stored, destination: destination, format: format, pixels: blank(kind, size.X, size.Y)}
+			order = append(order, stored.Path)
 		}
 	}
 

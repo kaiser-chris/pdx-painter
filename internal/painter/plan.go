@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kaiser-chris/pdx-painter/internal/locate"
+	"github.com/kaiser-chris/pdx-painter/internal/pdxmesh"
 )
 
 // Plan is what an advanced export writes, into one folder: the maps chosen,
@@ -31,19 +32,28 @@ type PlannedMap struct {
 	Format string `json:"format,omitempty"`
 }
 
-// PlannedMesh is the copy of the mesh file to write. The mesh is not changed
-// by painting, so it is copied as it is: an asset names the textures, so the
-// names inside the mesh do not matter to the games.
+// PlannedMesh is the mesh file to write.
+//
+// A mesh the plugin opened is not changed by painting, so it is copied as it
+// is: an asset names the textures, so the names inside the mesh do not matter
+// to the games. A project the plugin did not open has no mesh file of the
+// games behind it: its mesh is made from the OBJ Painter exports of it, its
+// positions scaled by Scale, one shape for every Texture Set.
 type PlannedMesh struct {
 	File string `json:"file"`
+
+	OBJ   string  `json:"obj,omitempty"`
+	Scale float64 `json:"scale,omitempty"`
 }
 
 // PlannedAsset is the asset to write: its file, and the names of the pdxmesh
-// and the entity it defines.
+// and the entity it defines. MeshFile is the file its pdxmesh names where the
+// plan writes no mesh and the manifest knows of none: one the user makes.
 type PlannedAsset struct {
-	File   string `json:"file"`
-	Mesh   string `json:"mesh"`
-	Entity string `json:"entity"`
+	File     string `json:"file"`
+	Mesh     string `json:"mesh"`
+	Entity   string `json:"entity"`
+	MeshFile string `json:"meshFile,omitempty"`
 }
 
 // check refuses a plan that cannot be carried out, before anything is
@@ -90,11 +100,15 @@ func (p *Plan) check(manifest *Manifest) error {
 		}
 	}
 
-	if (p.Mesh != nil || p.Asset != nil) && manifest.MeshFile == nil {
-		return fmt.Errorf("the mesh file of %s is not known, so neither it nor an asset can be written", manifest.Entity)
-	}
-
 	if p.Mesh != nil {
+		if p.Mesh.OBJ == "" && manifest.MeshFile == nil {
+			return fmt.Errorf("the mesh file of %s is not known, and no OBJ to make one of is given", manifest.Entity)
+		}
+
+		if p.Mesh.Scale < 0 {
+			return fmt.Errorf("the mesh is to be scaled by %v, which is less than nothing", p.Mesh.Scale)
+		}
+
 		if err := name("the mesh", p.Mesh.File, ".mesh"); err != nil {
 			return err
 		}
@@ -107,6 +121,12 @@ func (p *Plan) check(manifest *Manifest) error {
 
 		if p.Asset.Mesh == "" || p.Asset.Entity == "" {
 			return fmt.Errorf("the asset needs a name for its pdxmesh and its entity")
+		}
+
+		if p.Mesh == nil && manifest.MeshFile == nil {
+			if err := name("the mesh the asset names", p.Asset.MeshFile, ".mesh"); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -149,9 +169,27 @@ func (p *Plan) path(file string) string {
 	return filepath.Join(p.Folder, file)
 }
 
-// writeMeshAndAsset copies the mesh and writes the asset, as the plan says.
+// writeMeshAndAsset copies or makes the mesh and writes the asset, as the plan
+// says.
 func (p *Plan) writeMeshAndAsset(manifest *Manifest, options PackOptions, packed *Packed) error {
-	if p.Mesh != nil {
+	if p.Mesh != nil && p.Mesh.OBJ != "" {
+		destination := p.path(p.Mesh.File)
+
+		data, notes, err := p.meshOf(manifest)
+		if err != nil {
+			return err
+		}
+
+		packed.Notes = append(packed.Notes, notes...)
+
+		if !options.DryRun {
+			if err := write(destination, data, options.Backup); err != nil {
+				return err
+			}
+		}
+
+		packed.Written = append(packed.Written, destination)
+	} else if p.Mesh != nil {
 		destination := p.path(p.Mesh.File)
 
 		if sameFile(destination, manifest.MeshFile.Path) {
@@ -202,9 +240,15 @@ var textureKeys = []struct{ kind, key string }{
 // names; the mesh and the maps it does not write are the ones they were read
 // from, see reference.
 func (p *Plan) assetText(manifest *Manifest) string {
-	mesh := p.reference(manifest.MeshFile.Path, manifest.MeshFile.Relative, false)
-	if p.Mesh != nil {
+	var mesh string
+
+	switch {
+	case p.Mesh != nil:
 		mesh = p.Mesh.File
+	case manifest.MeshFile != nil:
+		mesh = p.reference(manifest.MeshFile.Path, manifest.MeshFile.Relative, false)
+	default:
+		mesh = p.Asset.MeshFile
 	}
 
 	var text strings.Builder
@@ -305,4 +349,92 @@ func (p *Plan) reference(absolute, relative string, texture bool) string {
 	}
 
 	return filepath.ToSlash(absolute)
+}
+
+// meshOf makes the mesh of a project the plugin did not open, from the OBJ
+// Painter exported of it: a shape for every material of the OBJ, which
+// Painter names after the Texture Set it is, drawn with that set's shader and
+// named after it, its material naming the maps the plan writes for the set.
+// A material of no Texture Set is a shape of its own name, and noted.
+func (p *Plan) meshOf(manifest *Manifest) ([]byte, []string, error) {
+	file, err := os.Open(p.Mesh.OBJ)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	groups, err := pdxmesh.ReadOBJ(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", p.Mesh.OBJ, err)
+	}
+
+	if len(groups) == 0 {
+		return nil, nil, fmt.Errorf("%s holds no faces", p.Mesh.OBJ)
+	}
+
+	scale := p.Mesh.Scale
+	if scale == 0 {
+		scale = 1
+	}
+
+	var (
+		shapes []pdxmesh.Shape
+		notes  []string
+	)
+
+	for _, group := range groups {
+		set := manifest.set(group.Material)
+
+		// A project of one Texture Set draws every face with it, whatever
+		// the OBJ calls its material.
+		if set == nil && len(manifest.TextureSets) == 1 {
+			set = &manifest.TextureSets[0]
+		}
+
+		material := pdxmesh.Material{Shader: "standard"}
+		shapeName := ShapeName(group.Material)
+
+		if set != nil {
+			shapeName = ShapeName(set.Name)
+
+			if len(set.Meshes) > 0 {
+				shapeName, material.Shader = set.Meshes[0].Shape, set.Meshes[0].Shader
+			}
+
+			material.Diffuse = p.fileOf(set.Name, Diffuse)
+			material.Normal = p.fileOf(set.Name, Normal)
+			material.Specular = p.fileOf(set.Name, Properties)
+		} else {
+			notes = append(notes, fmt.Sprintf("the mesh's material %s is no Texture Set; its shape names no textures", group.Material))
+		}
+
+		converted := pdxmesh.Convert(group, scale, material)
+
+		at := -1
+		for index := range shapes {
+			if shapes[index].Name == shapeName {
+				at = index
+			}
+		}
+
+		if at < 0 {
+			shapes = append(shapes, pdxmesh.Shape{Name: shapeName})
+			at = len(shapes) - 1
+		}
+
+		shapes[at].Meshes = append(shapes[at].Meshes, converted)
+	}
+
+	data, err := pdxmesh.Write(shapes)
+
+	return data, notes, err
+}
+
+// fileOf is the file name the plan writes a map of a set by, or none.
+func (p *Plan) fileOf(set, kind string) string {
+	if planned, ok := p.mapOf(set, kind); ok {
+		return planned.File
+	}
+
+	return ""
 }
